@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>resguard — Универсальный Rust-контроллер ресурсов, TUI и RS Dash</title>
+  <meta name="description" content="Лёгкий Rust-демон и панель управления ресурсами (CPU, RAM, Swap, SSD) с TUI-интерфейсом и десктопным приложением RS Dash." />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <div class="wrap nav">
+      <a class="brand" href="/ru/">
+        <img src="/favicon.svg" alt="resguard" />
+        <span>resguard</span>
+      </a>
+      <div class="nav-links">
+        <a href="#install">Установка</a>
+        <a href="#downloads">Скачать</a>
+        <a href="#features">Возможности</a>
+        <a href="#service">Сервис и автообновление</a>
+        <a href="https://github.com/repentandliveholy/resguard" target="_blank" rel="noopener">GitHub</a>
+        <div class="lang-switch" aria-label="Язык">
+          <a href="/">EN</a>
+          <a href="/ru/" class="active">RU</a>
+          <a href="/fr/">FR</a>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero" id="install">
+      <div class="badge">Rust · macOS · Linux · Windows · Автообновление</div>
+      <h1>Защита от 100% зависаний CPU и переполнения SSD свопом</h1>
+      <p class="lead">
+        <strong>resguard</strong> — универсальный монитор и регулятор ресурсов на Rust с интерактивным
+        терминальным дашбордом (<code>rs-tui</code>) и нативным десктоп-приложением (<strong>RS Dash</strong>).
+      </p>
+
+      <div class="install-card">
+        <div class="install-tabs">
+          <button class="tab-btn active" data-cmd="curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh">macOS / Linux</button>
+          <button class="tab-btn" data-cmd="curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh -s -- --service --with-gui">Установка + Сервис + GUI</button>
+          <button class="tab-btn" data-cmd="irm https://resguard.repentandliveholy.org/install.ps1 | iex">Windows (PowerShell)</button>
+        </div>
+        <div class="cmd-row">
+          <code id="install-cmd">curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh</code>
+          <button class="copy-btn" id="copy-btn">Копировать</button>
+        </div>
+      </div>
+
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#downloads">Скачать бинарники</a>
+        <a class="btn" href="https://github.com/repentandliveholy/resguard" target="_blank" rel="noopener">Исходный код на GitHub</a>
+      </div>
+    </section>
+
+    <section id="downloads">
+      <h2>Прямое скачивание бинарников</h2>
+      <p class="sec-sub">Собрано в GitHub Actions CI с проверкой контрольных сумм SHA256 (<code>resguard</code>, <code>rs-tui</code>, <code>rs-dash</code>).</p>
+      <div class="dl-grid">
+        <div class="dl-card">
+          <div>
+            <div class="os">macOS Apple Silicon</div>
+            <div class="meta">aarch64-apple-darwin (.tar.gz)</div>
+          </div>
+          <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-macos-arm64.tar.gz">Скачать CLI + TUI + GUI</a>
+        </div>
+        <div class="dl-card">
+          <div>
+            <div class="os">macOS Приложение (.app)</div>
+            <div class="meta">RS Dash.app (Apple Silicon)</div>
+          </div>
+          <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/RS-Dash-macos-arm64.app.tar.gz">Скачать RS Dash.app</a>
+        </div>
+        <div class="dl-card">
+          <div>
+            <div class="os">macOS Intel</div>
+            <div class="meta">x86_64-apple-darwin (.tar.gz)</div>
+          </div>
+          <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-macos-x86_64.tar.gz">Скачать CLI + TUI + GUI</a>
+        </div>
+        <div class="dl-card">
+          <div>
+            <div class="os">Linux x86_64</div>
+            <div class="meta">x86_64-unknown-linux-gnu</div>
+          </div>
+          <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-linux-x86_64.tar.gz">Скачать .tar.gz</a>
+        </div>
+        <div class="dl-card">
+          <div>
+            <div class="os">Linux ARM64</div>
+            <div class="meta">aarch64-unknown-linux-gnu</div>
+          </div>
+          <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-linux-arm64.tar.gz">Скачать .tar.gz</a>
+        </div>
+        <div class="dl-card">
+          <div>
+            <div class="os">Windows x86_64</div>
+            <div class="meta">x86_64-pc-windows-msvc (.zip)</div>
+          </div>
+          <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-windows-x86_64.zip">Скачать .zip</a>
+        </div>
+      </div>
+    </section>
+
+    <section id="features">
+      <h2>Три режима работы</h2>
+      <p class="sec-sub">Используйте фоновый CLI-демон, терминальный TUI или графическое окно — все работают на едином ядре.</p>
+      <div class="grid-3">
+        <div class="card">
+          <h3>CLI и демон <span class="pill pill-green">resguard</span></h3>
+          <p>Минимальная нагрузка (&lt;0.2% CPU). 3-зонный регулятор CPU (Soft QoS, High Duty-Cycle, Hard Cap) и аварийная пауза при нехватке RAM/SSD.</p>
+        </div>
+        <div class="card">
+          <h3>Терминальный TUI <span class="pill pill-cyan">rs-tui</span></h3>
+          <p>Интерактивная панель в стиле <code>htop</code>/<code>btop</code> (<code>resguard --tui</code>): графики, поиск процессов, QoS/пауза/защита и настройка порогов.</p>
+        </div>
+        <div class="card">
+          <h3>Десктоп-приложение <span class="pill pill-purple">RS Dash</span></h3>
+          <p>Нативный интерфейс на <code>eframe</code>/<code>egui</code>: графики в реальном времени, лог событий, просмотр логов демона и редактор <code>config.toml</code>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="service">
+      <div class="grid-2">
+        <div class="card">
+          <h3>Установка как системный сервис <span class="pill pill-amber">launchd · systemd · schtasks</span></h3>
+          <p>Автозапуск <code>resguard</code> при входе в систему и автоматический перезапуск после обновления:</p>
+          <pre>resguard --install-service
+resguard --service-status
+resguard --uninstall-service</pre>
+        </div>
+        <div class="card">
+          <h3>Обновление и автообновление <span class="pill pill-cyan">Проверка SHA256</span></h3>
+          <p>Проверяйте и устанавливайте релизы вручную или в автоматическом фоновом режиме:</p>
+          <pre>resguard --check-update
+resguard --update
+# Автообновление включено в режиме демона (--no-auto-update чтобы отключить)</pre>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <span>resguard · Лицензия MIT · Кроссплатформенный Rust</span>
+      <span><a href="https://github.com/repentandliveholy/resguard">github.com/repentandliveholy/resguard</a> · <a href="/install.sh">install.sh</a> · <a href="/install.ps1">install.ps1</a></span>
+    </footer>
+  </main>
+
+  <script>
+    const cmdEl = document.getElementById('install-cmd');
+    const copyBtn = document.getElementById('copy-btn');
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        cmdEl.textContent = btn.dataset.cmd;
+      });
+    });
+    copyBtn.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(cmdEl.textContent);
+      copyBtn.textContent = 'Скопировано!';
+      setTimeout(() => copyBtn.textContent = 'Копировать', 1500);
+    });
+  </script>
+</body>
+</html>

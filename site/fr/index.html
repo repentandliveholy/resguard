@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>resguard — Gouverneur de ressources Rust, TUI et RS Dash</title>
+  <meta name="description" content="Moniteur et gouverneur de ressources Rust multiplateforme (CPU, RAM, Swap, SSD) avec tableau de bord TUI et application native RS Dash." />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <div class="wrap nav">
+      <a class="brand" href="/fr/">
+        <img src="/favicon.svg" alt="resguard" />
+        <span>resguard</span>
+      </a>
+      <div class="nav-links">
+        <a href="#install">Installation</a>
+        <a href="#downloads">Téléchargements</a>
+        <a href="#features">Fonctionnalités</a>
+        <a href="#service">Service &amp; Mise à jour</a>
+        <a href="https://github.com/repentandliveholy/resguard" target="_blank" rel="noopener">GitHub</a>
+        <div class="lang-switch" aria-label="Langue">
+          <a href="/">EN</a>
+          <a href="/ru/">RU</a>
+          <a href="/fr/" class="active">FR</a>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero" id="install">
+      <div class="badge">Rust · macOS · Linux · Windows · Mise à jour auto</div>
+      <h1>Évitez les blocages CPU et les crashs dus au swap sur SSD plein</h1>
+      <p class="lead">
+        <strong>resguard</strong> est un gouverneur de ressources universel en Rust doté d'un tableau de bord
+        terminal (<code>rs-tui</code>) et d'une application native (<strong>RS Dash</strong>).
+      </p>
+
+      <div class="install-card">
+        <div class="install-tabs">
+          <button class="tab-btn active" data-cmd="curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh">macOS / Linux</button>
+          <button class="tab-btn" data-cmd="curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh -s -- --service --with-gui">Installer + Service + GUI</button>
+          <button class="tab-btn" data-cmd="irm https://resguard.repentandliveholy.org/install.ps1 | iex">Windows (PowerShell)</button>
+        </div>
+        <div class="cmd-row">
+          <code id="install-cmd">curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh</code>
+          <button class="copy-btn" id="copy-btn">Copier</button>
+        </div>
+      </div>
+
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#downloads">Télécharger les binaires</a>
+        <a class="btn" href="https://github.com/repentandliveholy/resguard" target="_blank" rel="noopener">Code source sur GitHub</a>
+      </div>
+    </section>
+
+    <section id="downloads">
+      <h2>Téléchargements directs</h2>
+      <p class="sec-sub">Compilé sur GitHub Actions CI avec vérification SHA256 (<code>resguard</code>, <code>rs-tui</code> et <code>rs-dash</code>).</p>
+      <div class="dl-grid">
+        <div class="dl-card">
+          <div>
+            <div class="os">macOS Apple Silicon</div>
+            <div class="meta">aarch64-apple-darwin (.tar.gz)</div>
+          </div>
+          <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-macos-arm64.tar.gz">Télécharger CLI + TUI + GUI</a>
+        </div>
+        <div class="dl-card">
+          <div>
+            <div class="os">macOS App (.app)</div>
+            <div class="meta">RS Dash.app (Apple Silicon)</div>
+          </div>
+          <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/RS-Dash-macos-arm64.app.tar.gz">Télécharger RS Dash.app</a>
+        </div>
+        <div class="dl-card">
+          <div>
+            <div class="os">macOS Intel</div>
+            <div class="meta">x86_64-apple-darwin (.tar.gz)</div>
+          </div>
+          <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-macos-x86_64.tar.gz">Télécharger CLI + TUI + GUI</a>
+        </div>
+        <div class="dl-card">
+          <div>
+            <div class="os">Linux x86_64</div>
+            <div class="meta">x86_64-unknown-linux-gnu</div>
+          </div>
+          <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-linux-x86_64.tar.gz">Télécharger .tar.gz</a>
+        </div>
+        <div class="dl-card">
+          <div>
+            <div class="os">Linux ARM64</div>
+            <div class="meta">aarch64-unknown-linux-gnu</div>
+          </div>
+          <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-linux-arm64.tar.gz">Télécharger .tar.gz</a>
+        </div>
+        <div class="dl-card">
+          <div>
+            <div class="os">Windows x86_64</div>
+            <div class="meta">x86_64-pc-windows-msvc (.zip)</div>
+          </div>
+          <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-windows-x86_64.zip">Télécharger .zip</a>
+        </div>
+      </div>
+    </section>
+
+    <section id="features">
+      <h2>Trois interfaces complémentaires</h2>
+      <p class="sec-sub">Choisissez le démon CLI léger, le tableau de bord terminal ou l'application graphique — tous partagent le même moteur.</p>
+      <div class="grid-3">
+        <div class="card">
+          <h3>CLI &amp; Démon <span class="pill pill-green">resguard</span></h3>
+          <p>Empreinte minimale (&lt;0.2% CPU). Gouverneur CPU à 3 zones (Soft QoS, High Duty-Cycle, Hard Cap) et garde d'urgence RAM/Swap/SSD.</p>
+        </div>
+        <div class="card">
+          <h3>Tableau de bord TUI <span class="pill pill-cyan">rs-tui</span></h3>
+          <p>Interface interactive façon <code>htop</code>/<code>btop</code> (<code>resguard --tui</code>) avec graphiques, recherche, actions QoS/Pause/Protection et seuils en direct.</p>
+        </div>
+        <div class="card">
+          <h3>Application Desktop <span class="pill pill-purple">RS Dash</span></h3>
+          <p>Interface native Rust <code>eframe</code>/<code>egui</code> avec courbes en temps réel, journaux d'événements et éditeur <code>config.toml</code>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="service">
+      <div class="grid-2">
+        <div class="card">
+          <h3>Installer comme service système <span class="pill pill-amber">launchd · systemd · schtasks</span></h3>
+          <p>Lancez <code>resguard</code> automatiquement à la connexion et redémarrez après mise à jour :</p>
+          <pre>resguard --install-service
+resguard --service-status
+resguard --uninstall-service</pre>
+        </div>
+        <div class="card">
+          <h3>Mise à jour &amp; Auto-Update <span class="pill pill-cyan">Vérifié par SHA256</span></h3>
+          <p>Vérifiez ou installez les mises à jour à tout moment, ou laissez le démon se mettre à jour automatiquement :</p>
+          <pre>resguard --check-update
+resguard --update
+# Actif par défaut en mode démon (--no-auto-update pour désactiver)</pre>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <span>resguard · Licence MIT · Rust multiplateforme</span>
+      <span><a href="https://github.com/repentandliveholy/resguard">github.com/repentandliveholy/resguard</a> · <a href="/install.sh">install.sh</a> · <a href="/install.ps1">install.ps1</a></span>
+    </footer>
+  </main>
+
+  <script>
+    const cmdEl = document.getElementById('install-cmd');
+    const copyBtn = document.getElementById('copy-btn');
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        cmdEl.textContent = btn.dataset.cmd;
+      });
+    });
+    copyBtn.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(cmdEl.textContent);
+      copyBtn.textContent = 'Copié !';
+      setTimeout(() => copyBtn.textContent = 'Copier', 1500);
+    });
+  </script>
+</body>
+</html>

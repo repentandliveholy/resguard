@@ -1,0 +1,34 @@
+[workspace]
+members = [".", "rs-dash"]
+resolver = "2"
+
+[package]
+name = "resguard"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight universal resource watcher & governor (CPU, RAM, Swap, Disk guard)"
+license = "MIT"
+default-run = "resguard"
+
+[features]
+default = ["tui"]
+tui = ["dep:ratatui", "dep:crossterm"]
+
+[dependencies]
+ratatui = { version = "0.29.0", optional = true }
+crossterm = { version = "0.28.1", optional = true }
+
+[[bin]]
+name = "resguard"
+path = "src/main.rs"
+
+[[bin]]
+name = "rs-tui"
+path = "src/bin/rs_tui.rs"
+required-features = ["tui"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

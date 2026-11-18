@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: resguard-macos-arm64.tar.gz
+            app_archive: RS-Dash-macos-arm64.app.tar.gz
+          - os: macos-14
+            target: x86_64-apple-darwin
+            archive: resguard-macos-x86_64.tar.gz
+            app_archive: RS-Dash-macos-x86_64.app.tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: resguard-linux-x86_64.tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: resguard-linux-arm64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: resguard-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libx11-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxcursor-dev \
+            libxinerama-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev
+
+      - name: Build release binaries
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist/stage
+          cp target/${{ matrix.target }}/release/resguard dist/stage/
+          cp target/${{ matrix.target }}/release/rs-tui dist/stage/
+          cp target/${{ matrix.target }}/release/rs-dash dist/stage/
+          cp README.md dist/stage/
+          tar -C dist/stage -czf dist/${{ matrix.archive }} resguard rs-tui rs-dash README.md
+
+      - name: Package macOS RS Dash.app
+        if: runner.os == 'macOS'
+        run: |
+          APP_DIR="dist/app/RS Dash.app"
+          mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+          cp target/${{ matrix.target }}/release/rs-dash "$APP_DIR/Contents/MacOS/rs-dash"
+          chmod +x "$APP_DIR/Contents/MacOS/rs-dash"
+          TMP_ICON="$(mktemp -d)"
+          ICONSET="$TMP_ICON/AppIcon.iconset"
+          mkdir -p "$ICONSET"
+          # Run native binary (if host arch) or host-built rs-dash to render icon
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            "$APP_DIR/Contents/MacOS/rs-dash" --export-icon-tga "$TMP_ICON/icon.tga"
+          else
+            cargo run --release -p rs-dash -- --export-icon-tga "$TMP_ICON/icon.tga"
+          fi
+          sips -s format png "$TMP_ICON/icon.tga" --out "$ICONSET/icon_512x512.png" >/dev/null
+          sips -z 16 16     "$ICONSET/icon_512x512.png" --out "$ICONSET/icon_16x16.png" >/dev/null
+          sips -z 32 32     "$ICONSET/icon_512x512.png" --out "$ICONSET/icon_16x16@2x.png" >/dev/null
+          sips -z 32 32     "$ICONSET/icon_512x512.png" --out "$ICONSET/icon_32x32.png" >/dev/null
+          sips -z 64 64     "$ICONSET/icon_512x512.png" --out "$ICONSET/icon_32x32@2x.png" >/dev/null
+          sips -z 128 128   "$ICONSET/icon_512x512.png" --out "$ICONSET/icon_128x128.png" >/dev/null
+          sips -z 256 256   "$ICONSET/icon_512x512.png" --out "$ICONSET/icon_128x128@2x.png" >/dev/null
+          sips -z 256 256   "$ICONSET/icon_512x512.png" --out "$ICONSET/icon_256x256.png" >/dev/null
+          cp "$ICONSET/icon_512x512.png" "$ICONSET/icon_256x256@2x.png"
+          iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/AppIcon.icns"
+          cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleExecutable</key>
+              <string>rs-dash</string>
+              <key>CFBundleIconFile</key>
+              <string>AppIcon</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.resguard.rs-dash</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>RS Dash</string>
+              <key>CFBundleDisplayName</key>
+              <string>RS Dash — Resguard Dashboard</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>0.1.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>12.0</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          PLIST
+          tar -C dist/app -czf dist/${{ matrix.app_archive }} "RS Dash.app"
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/stage | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/resguard.exe dist/stage/
+          Copy-Item target/${{ matrix.target }}/release/rs-tui.exe dist/stage/
+          Copy-Item target/${{ matrix.target }}/release/rs-dash.exe dist/stage/
+          Copy-Item README.md dist/stage/
+          Compress-Archive -Force -Path dist/stage/* -DestinationPath dist/${{ matrix.archive }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt & metadata
+        run: |
+          cp install.sh artifacts/install.sh
+          cp install.ps1 artifacts/install.ps1
+          VERSION=$(grep '^version' Cargo.toml | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "$VERSION" > artifacts/VERSION
+          (cd artifacts && sha256sum resguard-* RS-Dash-* install.sh install.ps1 > SHA256SUMS.txt)
+          cat artifacts/SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            artifacts/*
