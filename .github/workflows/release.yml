@@ -23,11 +23,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             target: aarch64-apple-darwin
             archive: resguard-macos-arm64.tar.gz
             app_archive: RS-Dash-macos-arm64.app.tar.gz
-          - os: macos-14
+          - os: macos-latest
             target: x86_64-apple-darwin
             archive: resguard-macos-x86_64.tar.gz
             app_archive: RS-Dash-macos-x86_64.app.tar.gz
@@ -88,8 +88,10 @@ jobs:
           TMP_ICON="$(mktemp -d)"
           ICONSET="$TMP_ICON/AppIcon.iconset"
           mkdir -p "$ICONSET"
-          # Run native binary (if host arch) or host-built rs-dash to render icon
-          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+          # Run native binary (if host arch matches) or host-built rs-dash to render icon
+          if [ "$(uname -m)" = "arm64" ] && [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            "$APP_DIR/Contents/MacOS/rs-dash" --export-icon-tga "$TMP_ICON/icon.tga"
+          elif [ "$(uname -m)" = "x86_64" ] && [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
             "$APP_DIR/Contents/MacOS/rs-dash" --export-icon-tga "$TMP_ICON/icon.tga"
           else
             cargo run --release -p rs-dash -- --export-icon-tga "$TMP_ICON/icon.tga"
