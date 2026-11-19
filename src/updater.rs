@@ -80,12 +80,6 @@ fn perform_self_update_inner(
     let archive_path = tmp_dir.join(asset);
     let sums_path = tmp_dir.join("SHA256SUMS.txt");
 
-    let gh_asset_url = format!(
-        "https://github.com/repos_unused/{}/releases/latest/download/{}",
-        REPO_SLUG, asset
-    );
-    let _ = gh_asset_url;
-
     let asset_urls = [
         format!(
             "https://github.com/{}/releases/latest/download/{}",
@@ -147,13 +141,20 @@ fn perform_self_update_inner(
         .map_err(|e| format!("Failed to resolve current executable path: {}", e))?;
     replace_executable(&new_bin, &current_exe)?;
 
-    // Also update sibling rs-tui if it sits in the same directory
-    let tui_name = if cfg!(windows) { "rs-tui.exe" } else { "rs-tui" };
+    // Also update sibling rs-tui / rs-dash when they sit in the same directory
+    // (install.sh, install.ps1 and the Windows installer all use one directory).
+    let siblings: &[&str] = if cfg!(windows) {
+        &["rs-tui.exe", "rs-dash.exe"]
+    } else {
+        &["rs-tui", "rs-dash"]
+    };
     if let Some(parent) = current_exe.parent() {
-        let sibling_tui = parent.join(tui_name);
-        if sibling_tui.exists() {
-            if let Some(new_tui) = find_file_recursive(&extract_dir, tui_name) {
-                let _ = replace_executable(&new_tui, &sibling_tui);
+        for name in siblings {
+            let sibling = parent.join(name);
+            if sibling.exists() {
+                if let Some(new_bin) = find_file_recursive(&extract_dir, name) {
+                    let _ = replace_executable(&new_bin, &sibling);
+                }
             }
         }
     }

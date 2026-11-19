@@ -1,6 +1,6 @@
 use egui::{pos2, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 
-use crate::theme::{BG_ELEVATED, BORDER_SUBTLE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY};
+use crate::theme::{BORDER_SUBTLE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY};
 
 pub struct Series<'a> {
     pub label: &'a str,
@@ -244,70 +244,3 @@ fn draw_dashed_hline(painter: &egui::Painter, x0: f32, x1: f32, y: f32, color: C
     }
 }
 
-/// Renders a slim progress bar with optional threshold marker ticks.
-pub fn draw_threshold_bar(
-    ui: &mut egui::Ui,
-    pct: f64,
-    fill_color: Color32,
-    markers: &[(f64, Color32)],
-) {
-    let w = ui.available_width().max(40.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 7.0), Sense::hover());
-    let painter = ui.painter_at(rect);
-
-    painter.rect_filled(rect, CornerRadius::same(4), BG_ELEVATED);
-    let frac = (pct / 100.0).clamp(0.0, 1.0) as f32;
-    if frac > 0.0 {
-        let fill_rect = Rect::from_min_max(
-            rect.min,
-            pos2(rect.min.x + rect.width() * frac, rect.max.y),
-        );
-        painter.rect_filled(fill_rect, CornerRadius::same(4), fill_color);
-    }
-
-    for &(m_pct, m_col) in markers {
-        let mf = (m_pct / 100.0).clamp(0.0, 1.0) as f32;
-        let mx = rect.min.x + rect.width() * mf;
-        painter.line_segment(
-            [pos2(mx, rect.min.y - 1.0), pos2(mx, rect.max.y + 1.0)],
-            Stroke::new(1.5, m_col),
-        );
-    }
-}
-
-/// Renders a compact sparkline for KPI cards.
-pub fn draw_sparkline(ui: &mut egui::Ui, values: &[f64], y_max: f64, color: Color32) {
-    let w = ui.available_width().max(40.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::hover());
-    let painter = ui.painter_at(rect);
-
-    if values.len() < 2 {
-        return;
-    }
-    let y_max = y_max.max(1.0);
-    let step_x = rect.width() / ((values.len() - 1) as f32);
-    let mut pts = Vec::with_capacity(values.len());
-    for (i, &v) in values.iter().enumerate() {
-        let x = rect.min.x + (i as f32) * step_x;
-        let frac = (v / y_max).clamp(0.0, 1.0) as f32;
-        let y = rect.max.y - 2.0 - frac * (rect.height() - 4.0);
-        pts.push(pos2(x, y));
-    }
-
-    let fill_col = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 36);
-    let bot_col = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 2);
-    let mut mesh = egui::Mesh::default();
-    for i in 0..pts.len() - 1 {
-        let p0 = pts[i];
-        let p1 = pts[i + 1];
-        let base = mesh.vertices.len() as u32;
-        mesh.colored_vertex(p0, fill_col);
-        mesh.colored_vertex(p1, fill_col);
-        mesh.colored_vertex(pos2(p1.x, rect.max.y), bot_col);
-        mesh.colored_vertex(pos2(p0.x, rect.max.y), bot_col);
-        mesh.add_triangle(base, base + 1, base + 2);
-        mesh.add_triangle(base, base + 2, base + 3);
-    }
-    painter.add(Shape::mesh(mesh));
-    painter.add(Shape::line(pts, Stroke::new(1.5, color)));
-}

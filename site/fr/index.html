@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>resguard — Gouverneur de ressources Rust, TUI et RS Dash</title>
-  <meta name="description" content="Moniteur et gouverneur de ressources Rust multiplateforme (CPU, RAM, Swap, SSD) avec tableau de bord TUI et application native RS Dash." />
+  <meta name="description" content="Moniteur de ressources Rust léger qui garde votre poste réactif : il abaisse la priorité des tâches lourdes quand le CPU sature et vous alerte avant que la RAM, le swap ou le disque ne posent problème — sans jamais figer une application." />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="/style.css" />
 </head>
@@ -19,6 +19,7 @@
         <a href="#install">Installation</a>
         <a href="#downloads">Téléchargements</a>
         <a href="#features">Fonctionnalités</a>
+        <a href="#safety">Sécurité</a>
         <a href="#service">Service &amp; Mise à jour</a>
         <a href="https://github.com/repentandliveholy/resguard" target="_blank" rel="noopener">GitHub</a>
         <div class="lang-switch" aria-label="Langue">
@@ -33,33 +34,36 @@
   <main class="wrap">
     <section class="hero" id="install">
       <div class="badge">Rust · macOS · Linux · Windows · Mise à jour auto</div>
-      <h1>Évitez les blocages CPU et les crashs dus au swap sur SSD plein</h1>
+      <h1>Un poste qui reste réactif sous forte charge — sans jamais figer une application</h1>
       <p class="lead">
-        <strong>resguard</strong> est un gouverneur de ressources universel en Rust doté d'un tableau de bord
-        terminal (<code>rs-tui</code>) et d'une application native (<strong>RS Dash</strong>).
+        <strong>resguard</strong> est un petit outil Rust qui abaisse discrètement la priorité des travaux lourds —
+        compilations, tests, outils de build, scripts — quand le processeur reste saturé, et vous prévient avant que la mémoire,
+        le swap ou l'espace disque ne viennent à manquer. Il est livré avec un tableau de bord terminal (<code>rs-tui</code>) et une application native (<strong>RS Dash</strong>).
       </p>
 
       <div class="install-card">
         <div class="install-tabs">
           <button class="tab-btn active" data-cmd="curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh">macOS / Linux</button>
           <button class="tab-btn" data-cmd="curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh -s -- --service --with-gui">Installer + Service + GUI</button>
-          <button class="tab-btn" data-cmd="irm https://resguard.repentandliveholy.org/install.ps1 | iex">Windows (PowerShell)</button>
+          <button class="tab-btn" data-cmd="irm https://resguard.repentandliveholy.org/install.ps1 | iex" data-win="1">Windows (PowerShell)</button>
         </div>
         <div class="cmd-row">
           <code id="install-cmd">curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh</code>
           <button class="copy-btn" id="copy-btn">Copier</button>
         </div>
+        <p class="install-alt" id="win-alt" hidden>Vous préférez un installateur classique ? <a href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-setup-windows-x86_64.exe">Télécharger l'installateur Windows (.exe)</a> — par utilisateur, sans droits administrateur, mise à jour automatique.</p>
       </div>
 
       <div class="cta-row">
         <a class="btn btn-primary" href="#downloads">Télécharger les binaires</a>
+        <a class="btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-setup-windows-x86_64.exe">Installateur Windows (.exe)</a>
         <a class="btn" href="https://github.com/repentandliveholy/resguard" target="_blank" rel="noopener">Code source sur GitHub</a>
       </div>
     </section>
 
     <section id="downloads">
       <h2>Téléchargements directs</h2>
-      <p class="sec-sub">Compilé sur GitHub Actions CI avec vérification SHA256 (<code>resguard</code>, <code>rs-tui</code> et <code>rs-dash</code>).</p>
+      <p class="sec-sub">Compilé sur GitHub Actions CI avec vérification SHA256 (<code>resguard</code>, <code>rs-tui</code> et <code>rs-dash</code>). Sous Windows, l'installateur est l'option la plus simple.</p>
       <div class="dl-grid">
         <div class="dl-card">
           <div>
@@ -96,9 +100,17 @@
           </div>
           <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-linux-arm64.tar.gz">Télécharger .tar.gz</a>
         </div>
+        <div class="dl-card dl-card-primary">
+          <div>
+            <div class="os">Installateur Windows <span class="pill pill-green">Recommandé</span></div>
+            <div class="meta">resguard-setup-windows-x86_64.exe</div>
+            <div class="note">Par utilisateur, sans droits admin, mise à jour automatique. Ajoute RS Dash au menu Démarrer et peut lancer resguard en arrière-plan à l'ouverture de session.</div>
+          </div>
+          <a class="dl-btn dl-btn-primary" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-setup-windows-x86_64.exe">Télécharger l'installateur (.exe)</a>
+        </div>
         <div class="dl-card">
           <div>
-            <div class="os">Windows x86_64</div>
+            <div class="os">Windows x86_64 (portable)</div>
             <div class="meta">x86_64-pc-windows-msvc (.zip)</div>
           </div>
           <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-windows-x86_64.zip">Télécharger .zip</a>
@@ -108,19 +120,43 @@
 
     <section id="features">
       <h2>Trois interfaces complémentaires</h2>
-      <p class="sec-sub">Choisissez le démon CLI léger, le tableau de bord terminal ou l'application graphique — tous partagent le même moteur.</p>
+      <p class="sec-sub">Choisissez le démon CLI léger, le tableau de bord terminal ou l'application graphique — tous partagent le même moteur. Un seul gouverneur tourne à la fois : le TUI et RS Dash se connectent au démon d'arrière-plan s'il est actif.</p>
       <div class="grid-3">
         <div class="card">
           <h3>CLI &amp; Démon <span class="pill pill-green">resguard</span></h3>
-          <p>Empreinte minimale (&lt;0.2% CPU). Gouverneur CPU à 3 zones (Soft QoS, High Duty-Cycle, Hard Cap) et garde d'urgence RAM/Swap/SSD.</p>
+          <p>Empreinte minimale (&lt;0.2% CPU). Quand le CPU reste saturé, il abaisse la priorité des tâches lourdes en ligne de commande — QoS d'arrière-plan (cœurs E) sous macOS, nice/poids cgroup sous Linux, priorité « inférieure à la normale » sous Windows. Les gardes RAM, swap et disque vous alertent en nommant le plus gros consommateur. Il indique aussi quelle part du CPU vient de processus qu'il ne peut pas gérer (système, autres utilisateurs).</p>
         </div>
         <div class="card">
           <h3>Tableau de bord TUI <span class="pill pill-cyan">rs-tui</span></h3>
-          <p>Interface interactive façon <code>htop</code>/<code>btop</code> (<code>resguard --tui</code>) avec graphiques, recherche, actions QoS/Pause/Protection et seuils en direct.</p>
+          <p>Interface interactive façon <code>htop</code>/<code>btop</code> (<code>resguard --tui</code>) avec graphiques, recherche de processus, liste protégée et réglage des seuils en direct — elle sert aussi de panneau de contrôle du démon d'arrière-plan.</p>
         </div>
         <div class="card">
           <h3>Application Desktop <span class="pill pill-purple">RS Dash</span></h3>
-          <p>Interface native Rust <code>eframe</code>/<code>egui</code> avec courbes en temps réel, journaux d'événements et éditeur <code>config.toml</code>.</p>
+          <p>Interface native Rust <code>eframe</code>/<code>egui</code> avec courbes en temps réel, journaux d'événements et éditeur <code>config.toml</code>. Si le démon tourne déjà, RS Dash devient son tableau de bord au lieu de lancer un second gouverneur.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="safety">
+      <h2>Garanties de sécurité</h2>
+      <p class="sec-sub">Principe de conception : ralentir une tâche est acceptable — la figer, jamais.</p>
+      <div class="grid-2">
+        <div class="card">
+          <h3>Aucune mise en pause par défaut <span class="pill pill-green">alerte d'abord</span></h3>
+          <p>Les gardes mémoire, swap et disque envoient une notification qui nomme le plus gros consommateur. La mise en pause est strictement optionnelle (<code>--emergency-pause</code>), ne vise qu'un processus à la fois et reprend automatiquement après environ 20&nbsp;secondes.</p>
+        </div>
+        <div class="card">
+          <h3>Vos applications et le système restent intacts <span class="pill pill-cyan">tâches batch uniquement</span></h3>
+          <p>Seuls les travaux lourds en ligne de commande sont dépriorisés. Les applications graphiques (tout ce qui se trouve dans un bundle <code>.app</code> sous macOS), les processus système, les terminaux et shells ainsi que votre liste protégée ne sont jamais touchés.</p>
+        </div>
+        <div class="card">
+          <h3>Chaque modification est réversible <span class="pill pill-amber">journal</span></h3>
+          <p>Chaque changement de priorité est consigné dans un journal et annulé à la sortie, au démarrage suivant après un plantage, ou à la demande :</p>
+          <pre>resguard --restore</pre>
+        </div>
+        <div class="card">
+          <h3>Un seul gouverneur à la fois <span class="pill pill-purple">fichier verrou</span></h3>
+          <p>Un fichier verrou garantit qu'un seul gouverneur est actif. RS Dash et <code>rs-tui</code> servent de tableau de bord et de panneau de contrôle au démon d'arrière-plan, au lieu de lui faire concurrence.</p>
         </div>
       </div>
     </section>
@@ -153,11 +189,13 @@ resguard --update
   <script>
     const cmdEl = document.getElementById('install-cmd');
     const copyBtn = document.getElementById('copy-btn');
+    const winAlt = document.getElementById('win-alt');
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         cmdEl.textContent = btn.dataset.cmd;
+        winAlt.hidden = !btn.dataset.win;
       });
     });
     copyBtn.addEventListener('click', async () => {

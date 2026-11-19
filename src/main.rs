@@ -6,9 +6,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use resguard::config::{self, CliAction, ColorMode, Config};
-use resguard::governor::{Governor, Zone};
-use resguard::model::{self, MemoryPressure};
-use resguard::platform::{create_backend, PlatformBackend};
+use resguard::governor::{EventKind, Zone};
+use resguard::model::MemoryPressure;
+use resguard::runtime::{self, Authority, Mode, Role, Runtime, Snapshot};
 use resguard::{service, updater};
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -16,36 +16,15 @@ static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
 mod sys_rt {
     use super::STOP_REQUESTED;
-    use std::ffi::{c_int, c_long};
+    use std::ffi::c_int;
     use std::sync::atomic::Ordering;
 
     const SIGINT: c_int = 2;
     const SIGHUP: c_int = 1;
     const SIGTERM: c_int = 15;
 
-    #[repr(C)]
-    struct Ctm {
-        tm_sec: c_int,
-        tm_min: c_int,
-        tm_hour: c_int,
-        _rest: [u8; 44],
-    }
-
-    impl Default for Ctm {
-        fn default() -> Self {
-            Self {
-                tm_sec: 0,
-                tm_min: 0,
-                tm_hour: 0,
-                _rest: [0u8; 44],
-            }
-        }
-    }
-
     extern "C" {
         fn signal(sig: c_int, handler: extern "C" fn(c_int)) -> usize;
-        fn time(tloc: *mut c_long) -> c_long;
-        fn localtime_r(timep: *const c_long, result: *mut Ctm) -> *mut Ctm;
     }
 
     extern "C" fn handle_exit_signal(_sig: c_int) {
@@ -60,19 +39,9 @@ mod sys_rt {
         }
     }
 
-    pub fn local_hms() -> String {
-        unsafe {
-            let mut now: c_long = 0;
-            time(&mut now);
-            let mut tm = Ctm::default();
-            if localtime_r(&now, &mut tm).is_null() {
-                return "00:00:00".to_string();
-            }
-            format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
-        }
-    }
-
     pub fn enable_ansi_terminal() {}
+
+    pub fn detach_console() {}
 }
 
 #[cfg(windows)]
@@ -85,26 +54,13 @@ mod sys_rt {
     const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
     const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
 
-    #[repr(C)]
-    #[derive(Default)]
-    struct SystemTime {
-        w_year: u16,
-        w_month: u16,
-        w_day_of_week: u16,
-        w_day: u16,
-        w_hour: u16,
-        w_minute: u16,
-        w_second: u16,
-        w_milliseconds: u16,
-    }
-
     #[link(name = "kernel32")]
     extern "system" {
         fn SetConsoleCtrlHandler(
             handler: extern "system" fn(u32) -> i32,
             add: i32,
         ) -> i32;
-        fn GetLocalTime(lp_system_time: *mut SystemTime);
+        fn FreeConsole() -> i32;
         fn GetStdHandle(n_std_handle: u32) -> Handle;
         fn GetConsoleMode(h_console_handle: Handle, lp_mode: *mut u32) -> i32;
         fn SetConsoleMode(h_console_handle: Handle, dw_mode: u32) -> i32;
@@ -121,10 +77,11 @@ mod sys_rt {
         }
     }
 
-    pub fn local_hms() -> String {
-        let mut st = SystemTime::default();
-        unsafe { GetLocalTime(&mut st) };
-        format!("{:02}:{:02}:{:02}", st.w_hour, st.w_minute, st.w_second)
+    /// Background service: drop the console window so nothing stays on screen.
+    pub fn detach_console() {
+        unsafe {
+            FreeConsole();
+        }
     }
 
     pub fn enable_ansi_terminal() {
@@ -159,7 +116,7 @@ fn should_use_color(mode: ColorMode) -> bool {
 }
 
 fn local_hms() -> String {
-    sys_rt::local_hms()
+    runtime::local_hms()
 }
 
 struct Logger {
@@ -217,29 +174,12 @@ fn sleep_interruptible(dur: Duration) {
     }
 }
 
-fn format_top_procs(procs: &[model::ProcessSample], limit: usize) -> String {
-    let mut sorted: Vec<&model::ProcessSample> = procs.iter().collect();
-    sorted.sort_by(|a, b| {
-        b.cpu_pct
-            .partial_cmp(&a.cpu_pct)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    sorted
-        .into_iter()
-        .take(limit)
-        .filter(|p| p.cpu_pct >= 0.5)
-        .map(|p| format!("{}:{:.1}%({:.0}M)", p.name, p.cpu_pct, p.rss_mb()))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 fn zone_color(zone: Zone) -> &'static str {
     match zone {
-        Zone::Normal => "1;32",           // bold green
-        Zone::Soft => "1;33",             // bold yellow
-        Zone::High => "1;35",             // bold magenta
-        Zone::Cap => "1;31",              // bold red
-        Zone::MemoryEmergency => "1;37;41", // bold white on red
+        Zone::Normal => "1;32",
+        Zone::Soft => "1;33",
+        Zone::High => "1;35",
+        Zone::MemoryEmergency => "1;37;41",
     }
 }
 
@@ -261,281 +201,244 @@ fn pressure_color(p: MemoryPressure) -> &'static str {
     }
 }
 
-fn event_color(ev: &str) -> &'static str {
-    if ev.contains("MEM/SSD guard paused") {
-        "1;31"
-    } else if ev.contains("Demoted") || ev.contains("duty-cycle") {
-        "33"
-    } else if ev.contains("Restored") || ev.contains("resumed") {
-        "32"
-    } else if ev.contains("[DRY-RUN]") {
-        "36"
-    } else {
-        "0"
+fn event_color(kind: EventKind) -> &'static str {
+    match kind {
+        EventKind::Action => "33",
+        EventKind::Restore => "32",
+        EventKind::Alert => "1;31",
+        EventKind::DryRun => "36",
+        EventKind::Manual => "35",
+        EventKind::Error => "31",
+        EventKind::System => "0",
     }
 }
 
-fn run(cfg: Config) -> Result<(), String> {
-    install_signal_handlers();
+fn format_top_procs(snap: &Snapshot, limit: usize) -> String {
+    let mut sorted: Vec<_> = snap.procs.iter().filter(|r| r.sample.cpu_pct >= 0.5).collect();
+    sorted.sort_by(|a, b| {
+        b.sample
+            .cpu_pct
+            .partial_cmp(&a.sample.cpu_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    sorted
+        .into_iter()
+        .take(limit)
+        .map(|r| {
+            let tag = if r.demoted {
+                "↓"
+            } else if r.paused {
+                "‖"
+            } else {
+                ""
+            };
+            format!("{}{}:{:.1}%({:.0}M)", tag, r.sample.name, r.sample.cpu_pct, r.sample.rss_mb())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
-    let mut backend = create_backend()?;
+fn run(cfg: Config, args: Vec<String>) -> Result<(), String> {
+    install_signal_handlers();
+    if cfg.service {
+        sys_rt::detach_console();
+    }
+
     let mut log = Logger::new(&cfg)?;
-    let self_pid = process::id();
-    let mut gov = Governor::new(self_pid);
+    let mode = if cfg.dry_run { Mode::DryRun } else { Mode::Active };
+    let mut rt = Runtime::new(cfg.clone(), mode, Role::Daemon)?;
+    if let Ok(Some(path)) = config::config_path_from_args(&args) {
+        let reload_args = args.clone();
+        rt.watch_config(path, move || config::build_run_config(&reload_args).map(|(c, _)| c));
+    }
 
     let banner = format!(
-        "resguard v{} | backend={} | cores={} | dry_run={} | CPU soft={:.0}% high={:.0}% cap={:.0}% | RAM high={:.0}% crit={:.0}% | SSD min={:.1}GB",
+        "resguard v{} | backend={} | cores={} | mode={} | soft={:.0}% high={:.0}% | RAM high={:.0}% crit={:.0}% | SSD min={:.1}GB | emergency_pause={}",
         env!("CARGO_PKG_VERSION"),
-        backend.backend_name(),
-        backend.num_cores(),
-        cfg.dry_run,
+        rt.backend_name(),
+        rt.num_cores(),
+        mode.label(),
         cfg.cpu_soft,
         cfg.cpu_high,
-        cfg.cpu_cap,
         cfg.ram_high_pct,
         cfg.ram_critical_pct,
         cfg.disk_min_free_gb,
+        cfg.emergency_pause,
     );
     log.emit(&banner, &log.paint("1;36", &banner));
 
-    // Prime process CPU tick baseline before first real measurement
-    let _ = backend.sample_processes(0, backend.num_cores());
-    let mut last_sample_time = Instant::now();
+    // First tick only primes CPU deltas.
     sleep_interruptible(Duration::from_millis(cfg.tick_ms));
 
-    // Optional background auto-updater (non-blocking thread)
-    let auto_update_msg: std::sync::Arc<std::sync::Mutex<Option<(String, bool)>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
-    if cfg.auto_update && !cfg.once && !cfg.dry_run {
-        let slot = std::sync::Arc::clone(&auto_update_msg);
-        let interval = Duration::from_secs(cfg.auto_update_interval_hours.max(1) * 3600);
-        let _ = thread::Builder::new()
-            .name("resguard-autoupdate".to_string())
-            .spawn(move || {
-                // Initial grace delay so startup never races
-                for _ in 0..60 {
-                    if STOP_REQUESTED.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    thread::sleep(Duration::from_secs(1));
-                }
-                loop {
-                    if STOP_REQUESTED.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    if let Ok(updater::UpdateOutcome::Updated { from, to }) =
-                        updater::perform_self_update(false)
-                    {
-                        let running_under_service = std::env::var_os("INVOCATION_ID").is_some()
-                            || std::env::var_os("XPC_SERVICE_NAME").is_some();
-                        if let Ok(mut g) = slot.lock() {
-                            *g = Some((
-                                format!("Auto-updated resguard {} -> {}", from, to),
-                                running_under_service,
-                            ));
-                        }
-                        if running_under_service {
-                            STOP_REQUESTED.store(true, Ordering::Relaxed);
-                        }
-                        return;
-                    }
-                    let mut slept = Duration::ZERO;
-                    while slept < interval {
-                        if STOP_REQUESTED.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        thread::sleep(Duration::from_secs(5));
-                        slept += Duration::from_secs(5);
-                    }
-                }
-            });
-    }
-
+    let auto_update_msg = spawn_auto_updater(&cfg);
     let mut last_status_print = Instant::now() - Duration::from_secs(10);
     let mut prev_zone = Zone::Normal;
+    let mut prev_authority: Option<Authority> = None;
 
     while !STOP_REQUESTED.load(Ordering::Relaxed) {
-        if let Ok(mut g) = auto_update_msg.lock() {
-            if let Some((msg, restart_pending)) = g.take() {
-                let full = if restart_pending {
-                    format!("{} | {} (restarting service into new binary)", local_hms(), msg)
-                } else {
-                    format!("{} | {} (restart resguard to run new binary)", local_hms(), msg)
-                };
-                log.emit(&full, &log.paint("1;32", &full));
+        if let Some(slot) = &auto_update_msg {
+            if let Ok(mut g) = slot.lock() {
+                if let Some((msg, restart_pending)) = g.take() {
+                    let full = if restart_pending {
+                        format!("{} | {} (restarting service into new binary)", local_hms(), msg)
+                    } else {
+                        format!("{} | {} (restart resguard to run new binary)", local_hms(), msg)
+                    };
+                    log.emit(&full, &log.paint("1;32", &full));
+                }
             }
         }
-        let now = Instant::now();
-        let elapsed_ns = now.duration_since(last_sample_time).as_nanos() as u64;
-        last_sample_time = now;
 
-        let metrics = backend.sample_system()?;
-        let procs = backend.sample_processes(elapsed_ns.max(1), metrics.num_cores);
+        let tick_started = Instant::now();
+        let snap = rt.tick();
 
-        let action = gov.evaluate_tick(now, &cfg, &metrics, &procs, backend.as_ref());
-        let ts = local_hms();
-
-        for ev in &action.events {
-            let plain = format!("{} | {}", ts, ev);
-            let colored = format!(
-                "{} | {}",
-                log.paint("90", &ts),
-                log.paint(event_color(ev), ev)
-            );
+        for ev in &snap.events {
+            let plain = format!("{} | {}", ev.ts, ev.msg);
+            let colored = format!("{} | {}", log.paint("90", &ev.ts), log.paint(event_color(ev.kind), &ev.msg));
             log.emit(&plain, &colored);
         }
 
-        let zone_changed = action.zone != prev_zone;
-        let print_periodic =
-            !cfg.quiet && now.duration_since(last_status_print) >= Duration::from_secs(2);
-        if cfg.once || zone_changed || print_periodic {
-            last_status_print = now;
-            let top = format_top_procs(&procs, 3);
-            let top_str = if top.is_empty() { "-" } else { &top };
-            let zone_txt = format!("{:>13}", action.zone.to_string());
-            let cpu_txt = format!("{:5.1}%", metrics.cpu_total_pct);
-            let ram_txt = format!("{:5.1}%", metrics.ram_used_pct);
-            let mp_txt = format!("{}", metrics.memory_pressure);
-            let swap_txt = format!(
-                "{:5.0}/{:.0}M",
-                metrics.swap_used_mb(),
-                metrics.swap_total_mb()
-            );
-            let ssd_txt = format!("{:5.1}G", metrics.disk_free_gb());
-            let load_txt = format!("{:.1}", metrics.load_1m);
-            let gpu_plain = metrics
-                .gpu_pct
-                .map(|g| format!(" | GPU {:3.0}%", g))
-                .unwrap_or_default();
-            let gpu_colored = metrics
-                .gpu_pct
-                .map(|g| {
-                    format!(
-                        " | {} {}",
-                        log.paint("1", "GPU"),
-                        log.paint(pct_color(g, cfg.cpu_soft, cfg.cpu_high), &format!("{:3.0}%", g))
-                    )
-                })
-                .unwrap_or_default();
-
-            let plain = format!(
-                "{} [{}] CPU {} (u:{:4.1}% s:{:4.1}%) load {}{} | RAM {} ({:.1}/{:.1}G {}) | Swap {} | SSD {} | bg={} paused={} duty={:.0}% | top: {}",
-                ts,
-                zone_txt,
-                cpu_txt,
-                metrics.cpu_user_pct,
-                metrics.cpu_sys_pct,
-                load_txt,
-                gpu_plain,
-                ram_txt,
-                metrics.ram_used_gb(),
-                metrics.ram_total_gb(),
-                mp_txt,
-                swap_txt,
-                ssd_txt,
-                gov.demoted_count(),
-                gov.emergency_paused_count(),
-                action.throttle_ratio * 100.0,
-                top_str
-            );
-
-            let ssd_col = if metrics.disk_free_gb() < cfg.disk_min_free_gb {
-                "1;31"
-            } else if metrics.disk_free_gb() < cfg.disk_min_free_gb * 2.0 {
-                "1;33"
-            } else {
-                "32"
-            };
-            let swap_col = if metrics.swap_used_mb() > cfg.swap_warn_mb {
-                "1;33"
-            } else {
-                "36"
-            };
-
-            let colored = format!(
-                "{} [{}] {} {} {} {} {}{} | {} {} ({:.1}/{:.1}G {}) | {} {} | {} {} | bg={} paused={} duty={:.0}% | {} {}",
-                log.paint("90", &ts),
-                log.paint(zone_color(action.zone), &zone_txt),
-                log.paint("1", "CPU"),
-                log.paint(pct_color(metrics.cpu_total_pct, cfg.cpu_soft, cfg.cpu_high), &cpu_txt),
-                log.paint("90", &format!("(u:{:4.1}% s:{:4.1}%)", metrics.cpu_user_pct, metrics.cpu_sys_pct)),
-                log.paint("90", "load"),
-                log.paint(pct_color(metrics.load_1m, metrics.num_cores as f64, (metrics.num_cores as f64) * 3.0), &load_txt),
-                gpu_colored,
-                log.paint("1", "RAM"),
-                log.paint(pct_color(metrics.ram_used_pct, cfg.ram_high_pct, cfg.ram_critical_pct), &ram_txt),
-                metrics.ram_used_gb(),
-                metrics.ram_total_gb(),
-                log.paint(pressure_color(metrics.memory_pressure), &mp_txt),
-                log.paint("1", "Swap"),
-                log.paint(swap_col, &swap_txt),
-                log.paint("1", "SSD"),
-                log.paint(ssd_col, &ssd_txt),
-                gov.demoted_count(),
-                gov.emergency_paused_count(),
-                action.throttle_ratio * 100.0,
-                log.paint("90", "top:"),
-                log.paint("37", top_str),
-            );
-            log.emit(&plain, &colored);
+        if prev_authority.as_ref() != Some(&snap.authority) {
+            if let Authority::Deferred { pid, role } = &snap.authority {
+                let msg = format!("{} | Standing by: resguard {} (PID {}) is governing", local_hms(), role, pid);
+                log.emit(&msg, &log.paint("36", &msg));
+            }
+            prev_authority = Some(snap.authority.clone());
         }
-        prev_zone = action.zone;
+
+        let zone_changed = snap.zone != prev_zone;
+        let print_periodic = !cfg.quiet && last_status_print.elapsed() >= Duration::from_secs(2);
+        if let Some(m) = &snap.metrics {
+            if cfg.once || zone_changed || print_periodic {
+                last_status_print = Instant::now();
+                print_status(&mut log, &cfg, &snap, m);
+            }
+        }
+        prev_zone = snap.zone;
 
         if cfg.once {
             break;
         }
-
-        if !cfg.dry_run
-            && !action.duty_pause_pids.is_empty()
-            && action.pause_duration > Duration::ZERO
-        {
-            let mut active_paused = Vec::with_capacity(action.duty_pause_pids.len());
-            for &pid in &action.duty_pause_pids {
-                if backend.pause_process(pid).is_ok() {
-                    active_paused.push(pid);
-                }
-            }
-            sleep_interruptible(action.pause_duration);
-            for pid in active_paused {
-                let _ = backend.resume_process(pid);
-            }
-            if !STOP_REQUESTED.load(Ordering::Relaxed) && action.run_duration > Duration::ZERO {
-                sleep_interruptible(action.run_duration);
-            }
-        } else {
-            sleep_interruptible(Duration::from_millis(cfg.tick_ms));
-        }
+        let tick = Duration::from_millis(rt.config().tick_ms);
+        sleep_interruptible(tick.saturating_sub(tick_started.elapsed()).max(Duration::from_millis(50)));
     }
 
-    cleanup_on_exit(&mut gov, &cfg, backend.as_ref(), &mut log);
+    for ev in rt.shutdown() {
+        let plain = format!("{} | {}", ev.ts, ev.msg);
+        log.emit(&plain, &log.paint(event_color(ev.kind), &plain));
+    }
     Ok(())
 }
 
-fn cleanup_on_exit(
-    gov: &mut Governor,
-    cfg: &Config,
-    backend: &dyn PlatformBackend,
-    log: &mut Logger,
-) {
-    let demoted = gov.demoted_count();
-    let paused = gov.emergency_paused_count();
-    gov.cleanup(cfg, backend);
-    if demoted > 0 || paused > 0 {
-        let msg = format!(
-            "{} | resguard exiting cleanly: restored {} demoted and {} paused process(es)",
-            local_hms(),
-            demoted,
-            paused
-        );
-        log.emit(&msg, &log.paint("32", &msg));
+fn print_status(log: &mut Logger, cfg: &Config, snap: &Snapshot, m: &resguard::model::SystemMetrics) {
+    let ts = local_hms();
+    let top = format_top_procs(snap, 3);
+    let top_str = if top.is_empty() { "-".to_string() } else { top };
+    let zone_txt = format!("{:>9}", snap.zone.label());
+    let cpu_txt = format!("{:5.1}%", m.cpu_total_pct);
+    let ram_txt = format!("{:5.1}%", m.ram_used_pct);
+    let gpu_txt = m.gpu_pct.map(|g| format!(" | GPU {:3.0}%", g)).unwrap_or_default();
+    let attrib = format!(
+        "yours {:.0}% (governable {:.0}%) other {:.0}%",
+        snap.own_cpu, snap.governable_cpu, snap.other_cpu
+    );
+    let plain = format!(
+        "{} [{}] CPU {} (u:{:4.1}% s:{:4.1}%) {} load {:.1}{} | RAM {} ({:.1}/{:.1}G {}) | Swap {:5.0}/{:.0}M | SSD {:5.1}G | slowed={} paused={} | top: {}",
+        ts, zone_txt, cpu_txt, m.cpu_user_pct, m.cpu_sys_pct, attrib, m.load_1m, gpu_txt,
+        ram_txt, m.ram_used_gb(), m.ram_total_gb(), m.memory_pressure,
+        m.swap_used_mb(), m.swap_total_mb(), m.disk_free_gb(),
+        snap.demoted.len(), snap.paused.len(), top_str
+    );
+    let ssd_col = if m.disk_free_gb() < cfg.disk_min_free_gb {
+        "1;31"
+    } else if m.disk_free_gb() < cfg.disk_min_free_gb * 2.0 {
+        "1;33"
+    } else {
+        "32"
+    };
+    let colored = format!(
+        "{} [{}] {} {} {} {} {} {}{} | {} {} ({:.1}/{:.1}G {}) | Swap {:5.0}/{:.0}M | SSD {} | slowed={} paused={} | {} {}",
+        log.paint("90", &ts),
+        log.paint(zone_color(snap.zone), &zone_txt),
+        log.paint("1", "CPU"),
+        log.paint(pct_color(m.cpu_total_pct, cfg.cpu_soft, cfg.cpu_high), &cpu_txt),
+        log.paint("90", &format!("(u:{:4.1}% s:{:4.1}%)", m.cpu_user_pct, m.cpu_sys_pct)),
+        log.paint("90", &attrib),
+        log.paint("90", "load"),
+        log.paint(pct_color(m.load_1m, m.num_cores as f64, (m.num_cores as f64) * 3.0), &format!("{:.1}", m.load_1m)),
+        gpu_txt,
+        log.paint("1", "RAM"),
+        log.paint(pct_color(m.ram_used_pct, cfg.ram_high_pct, cfg.ram_critical_pct), &ram_txt),
+        m.ram_used_gb(),
+        m.ram_total_gb(),
+        log.paint(pressure_color(m.memory_pressure), &m.memory_pressure.to_string()),
+        m.swap_used_mb(),
+        m.swap_total_mb(),
+        log.paint(ssd_col, &format!("{:5.1}G", m.disk_free_gb())),
+        snap.demoted.len(),
+        snap.paused.len(),
+        log.paint("90", "top:"),
+        log.paint("37", &top_str),
+    );
+    log.emit(&plain, &colored);
+}
+
+type UpdateSlot = std::sync::Arc<std::sync::Mutex<Option<(String, bool)>>>;
+
+fn spawn_auto_updater(cfg: &Config) -> Option<UpdateSlot> {
+    if !cfg.auto_update || cfg.once || cfg.dry_run {
+        return None;
     }
+    let slot: UpdateSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let slot_bg = std::sync::Arc::clone(&slot);
+    let interval = Duration::from_secs(cfg.auto_update_interval_hours.max(1) * 3600);
+    let _ = thread::Builder::new()
+        .name("resguard-autoupdate".to_string())
+        .spawn(move || {
+            // Initial grace delay so startup never races
+            for _ in 0..60 {
+                if STOP_REQUESTED.load(Ordering::Relaxed) {
+                    return;
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+            loop {
+                if STOP_REQUESTED.load(Ordering::Relaxed) {
+                    return;
+                }
+                if let Ok(updater::UpdateOutcome::Updated { from, to }) =
+                    updater::perform_self_update(false)
+                {
+                    let running_under_service = std::env::var_os("INVOCATION_ID").is_some()
+                        || std::env::var_os("XPC_SERVICE_NAME").is_some();
+                    if let Ok(mut g) = slot_bg.lock() {
+                        *g = Some((format!("Auto-updated resguard {} -> {}", from, to), running_under_service));
+                    }
+                    if running_under_service {
+                        // Exit cleanly (restoring everything); the service manager restarts us.
+                        STOP_REQUESTED.store(true, Ordering::Relaxed);
+                    }
+                    return;
+                }
+                let mut slept = Duration::ZERO;
+                while slept < interval {
+                    if STOP_REQUESTED.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_secs(5));
+                    slept += Duration::from_secs(5);
+                }
+            }
+        });
+    Some(slot)
 }
 
 fn main() {
     match config::parse_args_and_load() {
         Ok(CliAction::ExitOk) => {}
         Ok(CliAction::Run(cfg)) => {
-            if let Err(e) = run(cfg) {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            if let Err(e) = run(cfg, args) {
                 eprintln!("resguard error: {}", e);
                 process::exit(1);
             }
@@ -601,6 +504,13 @@ fn main() {
             Ok(msg) => println!("{}", msg),
             Err(e) => {
                 eprintln!("Service status failed: {}", e);
+                process::exit(1);
+            }
+        },
+        Ok(CliAction::Restore) => match runtime::restore_cli() {
+            Ok(msg) => println!("{}", msg),
+            Err(e) => {
+                eprintln!("Restore failed: {}", e);
                 process::exit(1);
             }
         },

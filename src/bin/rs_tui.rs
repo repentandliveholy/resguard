@@ -59,6 +59,13 @@ fn main() {
                 process::exit(1);
             }
         },
+        Ok(CliAction::Restore) => match resguard::runtime::restore_cli() {
+            Ok(msg) => println!("{}", msg),
+            Err(e) => {
+                eprintln!("Restore failed: {}", e);
+                process::exit(1);
+            }
+        },
         Err(e) => {
             eprintln!("Error: {}", e);
             process::exit(2);

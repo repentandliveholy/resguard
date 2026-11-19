@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>resguard — Universal Rust Resource Governor, TUI &amp; RS Dash</title>
-  <meta name="description" content="Zero-dependency Rust resource watcher &amp; governor with 3-zone CPU control, RAM/Swap/Low-SSD emergency guard, htop-style TUI, and native RS Dash desktop app." />
+  <meta name="description" content="Lightweight Rust resource watcher that keeps your desktop responsive: it de-prioritizes heavy batch work under sustained CPU load and warns before RAM, swap, or disk trouble — it never freezes apps. Includes an htop-style TUI and the native RS Dash desktop app." />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="/style.css" />
 </head>
@@ -19,6 +19,7 @@
         <a href="#install">Install</a>
         <a href="#downloads">Downloads</a>
         <a href="#features">Features</a>
+        <a href="#safety">Safety</a>
         <a href="#service">Service &amp; Auto-Update</a>
         <a href="https://github.com/repentandliveholy/resguard" target="_blank" rel="noopener">GitHub</a>
         <div class="lang-switch" aria-label="Language">
@@ -33,33 +34,36 @@
   <main class="wrap">
     <section class="hero" id="install">
       <div class="badge">Rust · macOS · Linux · Windows · Self-Updating</div>
-      <h1>Stop CPU lockups &amp; low-SSD swap crashes before your machine freezes</h1>
+      <h1>Keep your machine responsive under heavy load — without ever freezing an app</h1>
       <p class="lead">
-        <strong>resguard</strong> is a tiny, universal Rust resource watcher &amp; governor with a built-in
-        <strong>ratatui</strong> terminal dashboard (<code>rs-tui</code>) and native desktop app (<strong>RS Dash</strong>).
+        <strong>resguard</strong> is a tiny Rust resource watcher that quietly lowers the priority of heavy batch work —
+        compilers, test runners, build tools, scripts — when your CPU stays saturated, and warns you before memory, swap,
+        or disk space run out. It ships with a <strong>ratatui</strong> terminal dashboard (<code>rs-tui</code>) and a native desktop app (<strong>RS Dash</strong>).
       </p>
 
       <div class="install-card">
         <div class="install-tabs">
           <button class="tab-btn active" data-cmd="curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh">macOS / Linux</button>
           <button class="tab-btn" data-cmd="curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh -s -- --service --with-gui">Install + Service + GUI</button>
-          <button class="tab-btn" data-cmd="irm https://resguard.repentandliveholy.org/install.ps1 | iex">Windows (PowerShell)</button>
+          <button class="tab-btn" data-cmd="irm https://resguard.repentandliveholy.org/install.ps1 | iex" data-win="1">Windows (PowerShell)</button>
         </div>
         <div class="cmd-row">
           <code id="install-cmd">curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh</code>
           <button class="copy-btn" id="copy-btn">Copy</button>
         </div>
+        <p class="install-alt" id="win-alt" hidden>Prefer a classic installer? <a href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-setup-windows-x86_64.exe">Download the Windows Installer (.exe)</a> — per-user, no admin, self-updating.</p>
       </div>
 
       <div class="cta-row">
         <a class="btn btn-primary" href="#downloads">Download Binaries</a>
+        <a class="btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-setup-windows-x86_64.exe">Windows Installer (.exe)</a>
         <a class="btn" href="https://github.com/repentandliveholy/resguard" target="_blank" rel="noopener">Source on GitHub</a>
       </div>
     </section>
 
     <section id="downloads">
       <h2>Direct Binary Downloads</h2>
-      <p class="sec-sub">Prebuilt in GitHub Actions CI with SHA256 verification (<code>resguard</code>, <code>rs-tui</code>, and <code>rs-dash</code>).</p>
+      <p class="sec-sub">Prebuilt in GitHub Actions CI with SHA256 verification (<code>resguard</code>, <code>rs-tui</code>, and <code>rs-dash</code>). On Windows, the installer is the easiest option.</p>
       <div class="dl-grid">
         <div class="dl-card">
           <div>
@@ -96,9 +100,17 @@
           </div>
           <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-linux-arm64.tar.gz">Download .tar.gz</a>
         </div>
+        <div class="dl-card dl-card-primary">
+          <div>
+            <div class="os">Windows Installer <span class="pill pill-green">Recommended</span></div>
+            <div class="meta">resguard-setup-windows-x86_64.exe</div>
+            <div class="note">Per-user, no admin, self-updating. Adds RS Dash to the Start Menu and can run resguard in the background at logon.</div>
+          </div>
+          <a class="dl-btn dl-btn-primary" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-setup-windows-x86_64.exe">Download Installer (.exe)</a>
+        </div>
         <div class="dl-card">
           <div>
-            <div class="os">Windows x86_64</div>
+            <div class="os">Windows x86_64 (portable)</div>
             <div class="meta">x86_64-pc-windows-msvc (.zip)</div>
           </div>
           <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-windows-x86_64.zip">Download .zip</a>
@@ -108,19 +120,43 @@
 
     <section id="features">
       <h2>Three Ways to Run</h2>
-      <p class="sec-sub">Pick the lightweight daemon, the terminal dashboard, or the desktop app — all sharing the same core governor.</p>
+      <p class="sec-sub">Pick the lightweight daemon, the terminal dashboard, or the desktop app — all sharing the same core. Only one governor runs at a time: the TUI and RS Dash attach to the background daemon when it is running.</p>
       <div class="grid-3">
         <div class="card">
           <h3>CLI &amp; Daemon <span class="pill pill-green">resguard</span></h3>
-          <p>Runs with minimal overhead (&lt;0.2% CPU). 3-zone CPU governor (Soft QoS, High Duty-Cycle, Hard Cap) plus RAM/Swap/Low-SSD emergency pause.</p>
+          <p>Runs with minimal overhead (&lt;0.2% CPU). Under sustained CPU load it lowers the priority of heavy command-line work — background QoS (E-cores) on macOS, nice/cgroup weight on Linux, below-normal priority on Windows. RAM, swap, and low-disk guards alert you and name the biggest allocator. It also shows how much CPU comes from processes it can't govern (system services, other users).</p>
         </div>
         <div class="card">
           <h3>Terminal TUI <span class="pill pill-cyan">rs-tui</span></h3>
-          <p>Interactive <code>htop</code>/<code>btop</code>-style dashboard via <code>resguard --tui</code> with live sparklines, searchable process table, QoS/Pause/Protect keys, and threshold editor.</p>
+          <p>Interactive <code>htop</code>/<code>btop</code>-style dashboard via <code>resguard --tui</code> with live sparklines, a searchable process table, protect list, and threshold editor — it doubles as a control panel for the background daemon.</p>
         </div>
         <div class="card">
           <h3>Desktop App <span class="pill pill-purple">RS Dash</span></h3>
-          <p>Native Rust <code>eframe</code>/<code>egui</code> GUI with live time-series plots, hover crosshairs, daemon coexistence detection, log tailer, and <code>config.toml</code> editor.</p>
+          <p>Native Rust <code>eframe</code>/<code>egui</code> GUI with live time-series plots, hover crosshairs, log tailer, and <code>config.toml</code> editor. When the background daemon is running, RS Dash becomes its dashboard instead of starting a second governor.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="safety">
+      <h2>Safety Guarantees</h2>
+      <p class="sec-sub">Design principle: slowing work down is acceptable — freezing it never is.</p>
+      <div class="grid-2">
+        <div class="card">
+          <h3>Never pauses apps by default <span class="pill pill-green">alert-first</span></h3>
+          <p>Memory, swap, and low-disk guards send a notification naming the biggest allocator. Pausing is strictly opt-in (<code>--emergency-pause</code>), one process at a time, and auto-resumes after about 20&nbsp;seconds.</p>
+        </div>
+        <div class="card">
+          <h3>Hands off your apps &amp; system <span class="pill pill-cyan">batch work only</span></h3>
+          <p>Only heavy command-line and batch work is de-prioritized. GUI apps (anything inside a macOS <code>.app</code> bundle), system processes, terminals and shells, and your protected list are never touched.</p>
+        </div>
+        <div class="card">
+          <h3>Every change is reversible <span class="pill pill-amber">ledger</span></h3>
+          <p>Each priority change is recorded in a ledger and undone on exit, at the next start after a crash, or on demand:</p>
+          <pre>resguard --restore</pre>
+        </div>
+        <div class="card">
+          <h3>One governor at a time <span class="pill pill-purple">lock file</span></h3>
+          <p>A lock file guarantees a single governor. RS Dash and <code>rs-tui</code> act as dashboards and control panels for the background daemon instead of competing with it.</p>
         </div>
       </div>
     </section>
@@ -153,11 +189,13 @@ resguard --update
   <script>
     const cmdEl = document.getElementById('install-cmd');
     const copyBtn = document.getElementById('copy-btn');
+    const winAlt = document.getElementById('win-alt');
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         cmdEl.textContent = btn.dataset.cmd;
+        winAlt.hidden = !btn.dataset.win;
       });
     });
     copyBtn.addEventListener('click', async () => {

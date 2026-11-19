@@ -1,3 +1,6 @@
+// Release builds on Windows are GUI-subsystem apps: no console window behind the dashboard.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod charts;
 mod engine;
@@ -13,7 +16,7 @@ use resguard::config;
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut config_path: Option<PathBuf> = None;
-    let mut start_active = false;
+    let mut start_mode = resguard::runtime::Mode::DryRun;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -22,7 +25,8 @@ fn main() {
                     "rs-dash — Resguard Dashboard\n\n\
                      USAGE:\n    rs-dash [OPTIONS]\n\n\
                      OPTIONS:\n    \
-                     --active           Start in Active Guard mode (if no external daemon is running)\n    \
+                     --active           Start in Active mode (the background service stays in charge if running)\n    \
+                     --observe          Start in Observe mode\n    \
                      --config <PATH>    Load custom config.toml\n    \
                      -V, --version      Print version\n    \
                      -h, --help         Print help"
@@ -45,7 +49,8 @@ fn main() {
                 }
                 return;
             }
-            "--active" => start_active = true,
+            "--active" => start_mode = resguard::runtime::Mode::Active,
+            "--observe" => start_mode = resguard::runtime::Mode::Observe,
             "--config" => {
                 i += 1;
                 if let Some(p) = args.get(i) {
@@ -72,9 +77,9 @@ fn main() {
     };
 
     let viewport = egui::ViewportBuilder::default()
-        .with_title("RS Dash — Resguard Dashboard")
-        .with_inner_size([1180.0, 760.0])
-        .with_min_inner_size([720.0, 520.0])
+        .with_title("RS Dash")
+        .with_inner_size([1180.0, 820.0])
+        .with_min_inner_size([640.0, 480.0])
         .with_icon(icon::build_app_icon());
 
     let native_options = eframe::NativeOptions {
@@ -85,7 +90,7 @@ fn main() {
     if let Err(e) = eframe::run_native(
         "RS Dash",
         native_options,
-        Box::new(move |cc| Ok(Box::new(app::RsDashApp::new(cc, cfg, start_active)))),
+        Box::new(move |cc| Ok(Box::new(app::RsDashApp::new(cc, cfg, start_mode)))),
     ) {
         eprintln!("Failed to launch RS Dash: {}", e);
         process::exit(1);

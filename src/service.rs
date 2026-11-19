@@ -1,11 +1,28 @@
 use std::env;
+#[cfg(not(windows))]
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-pub fn install_service() -> Result<String, String> {
+/// The `resguard` daemon binary: the current executable, or its sibling when invoked
+/// from `rs-tui` / `rs-dash`.
+fn daemon_exe() -> Result<PathBuf, String> {
     let exe = env::current_exe()
         .map_err(|e| format!("Failed to resolve current executable path: {}", e))?;
+    let daemon_name = if cfg!(windows) { "resguard.exe" } else { "resguard" };
+    if exe.file_name().and_then(|n| n.to_str()) == Some(daemon_name) {
+        return Ok(exe);
+    }
+    let sibling = exe
+        .parent()
+        .map(|d| d.join(daemon_name))
+        .filter(|p| p.exists())
+        .ok_or_else(|| format!("Could not find {} next to {}", daemon_name, exe.display()))?;
+    Ok(sibling)
+}
+
+pub fn install_service() -> Result<String, String> {
+    let exe = daemon_exe()?;
     let exe_str = exe.to_string_lossy().to_string();
 
     #[cfg(target_os = "macos")]
@@ -97,12 +114,14 @@ fn install_macos(exe: &str) -> Result<String, String> {
     <key>ProgramArguments</key>
     <array>
         <string>{}</string>
-        <string>--quiet</string>
+        <string>--service</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
     <key>StandardOutPath</key>
     <string>/tmp/resguard.log</string>
     <key>StandardErrorPath</key>
@@ -233,7 +252,7 @@ After=default.target\n\
 \n\
 [Service]\n\
 Type=simple\n\
-ExecStart={} --quiet\n\
+ExecStart={} --service\n\
 Restart=always\n\
 RestartSec=3\n\
 \n\
@@ -321,33 +340,16 @@ fn status_linux() -> Result<String, String> {
 
 #[cfg(target_os = "windows")]
 fn install_windows(exe: &str) -> Result<String, String> {
-    let tr = format!("\"{}\" --quiet", exe);
+    // Per-user task at logon, normal privileges. `--service` detaches the console window
+    // and logs to %LOCALAPPDATA%\resguard\resguard.log.
+    let tr = format!("\"{}\" --service", exe);
     let out = Command::new("schtasks")
-        .args([
-            "/Create",
-            "/TN",
-            "resguard",
-            "/TR",
-            &tr,
-            "/SC",
-            "ONLOGON",
-            "/RL",
-            "HIGHEST",
-            "/F",
-        ])
+        .args(["/Create", "/TN", "resguard", "/TR", &tr, "/SC", "ONLOGON", "/F"])
         .output()
         .map_err(|e| format!("Failed to run schtasks: {}", e))?;
-
     if !out.status.success() {
-        // Fallback without HIGHEST if non-admin
-        let out2 = Command::new("schtasks")
-            .args(["/Create", "/TN", "resguard", "/TR", &tr, "/SC", "ONLOGON", "/F"])
-            .output()
-            .map_err(|e| format!("Failed to run schtasks: {}", e))?;
-        if !out2.status.success() {
-            let err = String::from_utf8_lossy(&out2.stderr);
-            return Err(format!("schtasks /Create failed: {}", err.trim()));
-        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("schtasks /Create failed: {}", err.trim()));
     }
 
     let _ = Command::new("schtasks")
@@ -359,6 +361,14 @@ fn install_windows(exe: &str) -> Result<String, String> {
 
 #[cfg(target_os = "windows")]
 fn uninstall_windows() -> Result<String, String> {
+    let exists = Command::new("schtasks")
+        .args(["/Query", "/TN", "resguard"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !exists {
+        return Ok("Windows Task 'resguard' is not installed".to_string());
+    }
     let _ = Command::new("schtasks")
         .args(["/End", "/TN", "resguard"])
         .output();

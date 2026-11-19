@@ -1,7 +1,10 @@
 pub mod config;
+pub mod control;
 pub mod governor;
 pub mod model;
+pub mod paths;
 pub mod platform;
+pub mod runtime;
 pub mod service;
 #[cfg(feature = "tui")]
 pub mod tui;

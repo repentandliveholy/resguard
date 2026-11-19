@@ -324,6 +324,26 @@ h2 {
 }
 .dl-card .dl-btn:hover { text-decoration: none; border-color: var(--cyan); }
 
+/* Recommended download (Windows installer) */
+.dl-card-primary {
+  border-color: rgba(56, 189, 248, 0.55);
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.09), transparent 70%), var(--surface);
+}
+.dl-card .os .pill { margin-left: 6px; vertical-align: middle; }
+.dl-card .note { margin-top: 6px; font-size: 0.84rem; color: var(--text-2); }
+.dl-card .dl-btn-primary {
+  background: rgba(56, 189, 248, 0.18);
+  border-color: var(--cyan);
+}
+
+/* Hero: Windows installer link under the PowerShell command */
+.install-alt {
+  margin: 10px 2px 0;
+  font-size: 0.86rem;
+  color: var(--text-2);
+}
+.install-alt[hidden] { display: none; }
+
 pre {
   margin: 10px 0 0;
   background: #080b10;

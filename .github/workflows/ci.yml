@@ -43,3 +43,20 @@ jobs:
 
       - name: Check zero-dependency CLI build (--no-default-features)
         run: cargo check --no-default-features -p resguard
+
+      # Validate installer/windows/resguard.iss on every push. Uses a debug build
+      # (dependencies are already compiled by `cargo test` above, so this only links
+      # the three binaries) and fast compression — the release workflow builds the
+      # real installer from the LTO release binaries.
+      - name: Build debug binaries for installer check
+        if: runner.os == 'Windows'
+        run: cargo build --workspace
+
+      - name: Compile Windows installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "resguard-stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target/debug/resguard.exe, target/debug/rs-tui.exe, target/debug/rs-dash.exe, README.md -Destination $stage
+          ./installer/windows/build-installer.ps1 -SourceDir $stage -OutputDir (Join-Path $env:RUNNER_TEMP "resguard-installer") -Compression zip/1

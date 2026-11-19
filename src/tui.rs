@@ -1,6 +1,5 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::io::{self, Stdout};
-use std::process;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -22,9 +21,13 @@ use ratatui::widgets::{
 use ratatui::{Frame, Terminal};
 
 use crate::config::{self, Config};
-use crate::governor::{build_protected_pids, Governor, TickAction, Zone};
-use crate::model::{MemoryPressure, ProcessSample, SystemMetrics};
-use crate::platform::{create_backend, PlatformBackend};
+use crate::control::Command;
+use crate::governor::{EventKind, Zone};
+use crate::model::{MemoryPressure, SystemMetrics};
+use crate::runtime::{local_hms, Authority, Mode, ProcRow, Role, Runtime};
+
+/// Default length of a manual pause from the TUI.
+const MANUAL_PAUSE_SECS: u64 = 30;
 
 const HISTORY_CAP: usize = 120;
 const EVENTS_CAP: usize = 200;
@@ -48,7 +51,7 @@ impl TuiMode {
     fn label(self) -> &'static str {
         match self {
             TuiMode::DryRun => "DRY-RUN",
-            TuiMode::Active => "ACTIVE GUARD",
+            TuiMode::Active => "ACTIVE",
             TuiMode::Observe => "OBSERVE",
         }
     }
@@ -58,6 +61,14 @@ impl TuiMode {
             TuiMode::DryRun => Color::Cyan,
             TuiMode::Active => Color::Green,
             TuiMode::Observe => Color::DarkGray,
+        }
+    }
+
+    fn to_mode(self) -> Mode {
+        match self {
+            TuiMode::DryRun => Mode::DryRun,
+            TuiMode::Active => Mode::Active,
+            TuiMode::Observe => Mode::Observe,
         }
     }
 }
@@ -124,28 +135,11 @@ impl ProcSort {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EventKind {
-    Intervention,
-    Restore,
-    Emergency,
-    DryRun,
-    Manual,
-    System,
-}
-
 #[derive(Debug, Clone)]
 struct EventEntry {
     ts: String,
     kind: EventKind,
     msg: String,
-}
-
-struct ProcRow {
-    sample: ProcessSample,
-    is_protected: bool,
-    is_demoted: bool,
-    is_emergency_paused: bool,
 }
 
 struct TerminalGuard {
@@ -194,9 +188,11 @@ struct TuiState {
 
     backend_name: String,
     num_cores: usize,
-    ext_daemon_pid: Option<u32>,
+    authority: Authority,
     zone: Zone,
-    throttle_ratio: f64,
+    own_cpu: f64,
+    governable_cpu: f64,
+    other_cpu: f64,
     metrics: SystemMetrics,
     rows: Vec<ProcRow>,
     protected_count: usize,
@@ -205,8 +201,6 @@ struct TuiState {
     cpu_hist: VecDeque<u64>,
     ram_hist: VecDeque<u64>,
     events: VecDeque<EventEntry>,
-    manual_bg_pids: HashSet<u32>,
-    protected_pids: HashSet<u32>,
 }
 
 impl TuiState {
@@ -234,9 +228,11 @@ impl TuiState {
             status_msg: None,
             backend_name,
             num_cores,
-            ext_daemon_pid: None,
+            authority: Authority::Simulating,
             zone: Zone::Normal,
-            throttle_ratio: 0.0,
+            own_cpu: 0.0,
+            governable_cpu: 0.0,
+            other_cpu: 0.0,
             metrics: SystemMetrics {
                 cpu_total_pct: 0.0,
                 cpu_user_pct: 0.0,
@@ -259,20 +255,18 @@ impl TuiState {
             cpu_hist: VecDeque::with_capacity(HISTORY_CAP),
             ram_hist: VecDeque::with_capacity(HISTORY_CAP),
             events: VecDeque::with_capacity(EVENTS_CAP),
-            manual_bg_pids: HashSet::new(),
-            protected_pids: HashSet::new(),
         }
     }
 
     fn push_event(&mut self, kind: EventKind, msg: String) {
+        self.push_event_at(local_hms(), kind, msg);
+    }
+
+    fn push_event_at(&mut self, ts: String, kind: EventKind, msg: String) {
         if self.events.len() >= EVENTS_CAP {
             self.events.pop_back();
         }
-        self.events.push_front(EventEntry {
-            ts: local_hms(),
-            kind,
-            msg,
-        });
+        self.events.push_front(EventEntry { ts, kind, msg });
     }
 
     fn set_status(&mut self, msg: String, color: Color) {
@@ -288,10 +282,8 @@ impl TuiState {
                 let f_ok = match self.filter {
                     ProcFilter::All => true,
                     ProcFilter::ActiveCpu => r.sample.cpu_pct >= 1.0,
-                    ProcFilter::Governed => {
-                        r.is_demoted || r.is_emergency_paused || r.sample.is_stopped
-                    }
-                    ProcFilter::Protected => r.is_protected,
+                    ProcFilter::Governed => r.demoted || r.paused || r.sample.is_stopped,
+                    ProcFilter::Protected => !r.eligibility.is_governable(),
                 };
                 if !f_ok {
                     return false;
@@ -332,8 +324,8 @@ impl TuiState {
             (
                 r.sample.pid,
                 r.sample.name.clone(),
-                r.is_protected,
-                r.is_demoted,
+                !r.eligibility.is_governable(),
+                r.demoted,
                 r.sample.is_stopped,
             )
         })
@@ -351,9 +343,9 @@ impl TuiState {
 }
 
 pub fn run_tui(cfg: Config) -> Result<(), String> {
-    let mut backend = create_backend()?;
-    let self_pid = process::id();
-    let mut gov = Governor::new(self_pid);
+    // Start in dry-run; Active is one key press away ([m]). If the daemon is governing,
+    // the TUI follows it and forwards manual actions to it.
+    let mut rt = Runtime::new(cfg.clone(), Mode::DryRun, Role::Tui)?;
 
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -365,185 +357,95 @@ pub fn run_tui(cfg: Config) -> Result<(), String> {
     let (mut term_guard, mut terminal) =
         TerminalGuard::enter().map_err(|e| format!("Failed to initialize terminal: {}", e))?;
 
-    let mut state = TuiState::new(
-        cfg.clone(),
-        backend.backend_name().to_string(),
-        backend.num_cores(),
+    let mut state = TuiState::new(cfg, rt.backend_name().to_string(), rt.num_cores());
+    state.push_event(
+        EventKind::System,
+        "Started in DRY-RUN (press [m] for ACTIVE). Nothing is changed in dry-run.".to_string(),
     );
-
-    // Prime CPU process delta baseline
-    let prime_procs = backend.sample_processes(0, backend.num_cores());
-    state.ext_daemon_pid = detect_external_daemon(self_pid, &prime_procs);
-    if let Some(dpid) = state.ext_daemon_pid {
-        state.mode = TuiMode::DryRun;
-        state.push_event(
-            EventKind::System,
-            format!(
-                "Detected running resguard daemon (PID {}) — starting in DRY-RUN to avoid conflict",
-                dpid
-            ),
-        );
-    } else if !cfg.dry_run {
-        state.push_event(
-            EventKind::System,
-            "Started in DRY-RUN mode (press [m] to switch to ACTIVE GUARD)".to_string(),
-        );
-    }
 
     let mut last_sample = Instant::now() - Duration::from_millis(state.cfg.tick_ms);
     let mut running = true;
-
-    // Initial short sleep so first process CPU delta is non-zero
     std::thread::sleep(Duration::from_millis(120));
 
-    while running {
-        let now = Instant::now();
-        let tick_dur = Duration::from_millis(state.cfg.tick_ms);
-
-        let mut duty_pause_pids: Vec<u32> = Vec::new();
-        let mut duty_pause_dur = Duration::ZERO;
-
-        if now.duration_since(last_sample) >= tick_dur {
-            let elapsed_ns = now.duration_since(last_sample).as_nanos() as u64;
-            last_sample = now;
-
-            if let Ok(metrics) = backend.sample_system() {
-                let procs = backend.sample_processes(elapsed_ns.max(1), metrics.num_cores);
-                state.ext_daemon_pid = detect_external_daemon(self_pid, &procs);
-                let live_pids: HashSet<u32> = procs.iter().map(|p| p.pid).collect();
-                state.manual_bg_pids.retain(|pid| live_pids.contains(pid));
-
-                let protected =
-                    build_protected_pids(self_pid, backend.current_uid(), &procs, &state.cfg);
-                state.protected_pids = protected.clone();
-                state.protected_count = protected.len();
-
-                let mut eval_cfg = state.cfg.clone();
-                eval_cfg.dry_run = state.mode != TuiMode::Active;
-
-                let action = match state.mode {
-                    TuiMode::Observe => TickAction {
-                        zone: Zone::Normal,
-                        throttle_ratio: 0.0,
-                        duty_pause_pids: Vec::new(),
-                        pause_duration: Duration::ZERO,
-                        run_duration: tick_dur,
-                        events: Vec::new(),
-                    },
-                    TuiMode::DryRun | TuiMode::Active => {
-                        gov.evaluate_tick(now, &eval_cfg, &metrics, &procs, backend.as_ref())
+    let result = (|| -> Result<(), String> {
+        while running {
+            let tick_dur = Duration::from_millis(state.cfg.tick_ms);
+            if last_sample.elapsed() >= tick_dur {
+                last_sample = Instant::now();
+                let snap = rt.tick();
+                for ev in snap.events {
+                    state.push_event_at(ev.ts, ev.kind, ev.msg);
+                }
+                state.authority = snap.authority;
+                state.zone = snap.zone;
+                state.own_cpu = snap.own_cpu;
+                state.governable_cpu = snap.governable_cpu;
+                state.other_cpu = snap.other_cpu;
+                state.demoted_count = snap.demoted.len();
+                state.paused_count = snap.paused.len();
+                state.protected_count = snap
+                    .procs
+                    .iter()
+                    .filter(|r| !r.eligibility.is_governable())
+                    .count();
+                if let Some(metrics) = snap.metrics {
+                    if state.cpu_hist.len() >= HISTORY_CAP {
+                        state.cpu_hist.pop_front();
                     }
-                };
-
-                state.zone = action.zone;
-                state.throttle_ratio = action.throttle_ratio;
-                state.demoted_count = gov.demoted_count();
-                state.paused_count = gov.emergency_paused_count();
-
-                for ev in &action.events {
-                    let kind = classify_event(ev);
-                    state.push_event(kind, ev.clone());
+                    state
+                        .cpu_hist
+                        .push_back(metrics.cpu_total_pct.round().clamp(0.0, 100.0) as u64);
+                    if state.ram_hist.len() >= HISTORY_CAP {
+                        state.ram_hist.pop_front();
+                    }
+                    state
+                        .ram_hist
+                        .push_back(metrics.ram_used_pct.round().clamp(0.0, 100.0) as u64);
+                    state.metrics = metrics;
                 }
-
-                if state.mode == TuiMode::Active
-                    && !action.duty_pause_pids.is_empty()
-                    && action.pause_duration > Duration::ZERO
-                {
-                    duty_pause_pids = action.duty_pause_pids;
-                    duty_pause_dur = action.pause_duration.min(Duration::from_millis(120));
-                }
-
-                if state.cpu_hist.len() >= HISTORY_CAP {
-                    state.cpu_hist.pop_front();
-                }
-                state
-                    .cpu_hist
-                    .push_back(metrics.cpu_total_pct.round().clamp(0.0, 100.0) as u64);
-
-                if state.ram_hist.len() >= HISTORY_CAP {
-                    state.ram_hist.pop_front();
-                }
-                state
-                    .ram_hist
-                    .push_back(metrics.ram_used_pct.round().clamp(0.0, 100.0) as u64);
-
-                state.metrics = metrics;
-                state.rows = procs
-                    .into_iter()
-                    .map(|p| {
-                        let pid = p.pid;
-                        ProcRow {
-                            is_protected: protected.contains(&pid),
-                            is_demoted: gov.is_demoted(pid) || state.manual_bg_pids.contains(&pid),
-                            is_emergency_paused: gov.is_emergency_paused(pid),
-                            sample: p,
-                        }
-                    })
-                    .collect();
+                state.rows = snap.procs;
                 state.clamp_selection();
             }
-        }
 
-        // Apply short duty-cycle pulse if Active Guard requested it
-        if !duty_pause_pids.is_empty() && duty_pause_dur > Duration::ZERO {
-            let mut active_paused = Vec::with_capacity(duty_pause_pids.len());
-            for pid in duty_pause_pids {
-                if backend.pause_process(pid).is_ok() {
-                    active_paused.push(pid);
+            if let Some((_, _, t)) = &state.status_msg {
+                if t.elapsed() >= Duration::from_secs(4) {
+                    state.status_msg = None;
                 }
             }
-            std::thread::sleep(duty_pause_dur);
-            for pid in active_paused {
-                let _ = backend.resume_process(pid);
-            }
-        }
 
-        // Clear expired status toast
-        if let Some((_, _, t)) = &state.status_msg {
-            if t.elapsed() >= Duration::from_secs(4) {
-                state.status_msg = None;
-            }
-        }
+            terminal
+                .draw(|f| draw_ui(f, &mut state))
+                .map_err(|e| format!("Terminal draw error: {}", e))?;
 
-        terminal
-            .draw(|f| draw_ui(f, &mut state))
-            .map_err(|e| format!("Terminal draw error: {}", e))?;
-
-        // Poll input up to 60ms so UI feels instant
-        let wait = tick_dur
-            .saturating_sub(last_sample.elapsed())
-            .min(Duration::from_millis(60));
-        if event::poll(wait).map_err(|e| format!("Event poll error: {}", e))? {
-            match event::read().map_err(|e| format!("Event read error: {}", e))? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    running = handle_key(key.code, key.modifiers, &mut state, &mut gov, backend.as_ref());
+            let wait = tick_dur
+                .saturating_sub(last_sample.elapsed())
+                .min(Duration::from_millis(60));
+            if event::poll(wait).map_err(|e| format!("Event poll error: {}", e))? {
+                match event::read().map_err(|e| format!("Event read error: {}", e))? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        running = handle_key(key.code, key.modifiers, &mut state, &mut rt);
+                    }
+                    Event::Mouse(mouse) => {
+                        handle_mouse(mouse.kind, mouse.row, &mut state);
+                    }
+                    _ => {}
                 }
-                Event::Mouse(mouse) => {
-                    handle_mouse(mouse.kind, mouse.row, &mut state);
-                }
-                _ => {}
             }
         }
-    }
+        Ok(())
+    })();
 
-    // Restore any governed or manually backgrounded processes on exit
-    let mut clean_cfg = state.cfg.clone();
-    clean_cfg.dry_run = false;
-    gov.cleanup(&clean_cfg, backend.as_ref());
-    for pid in state.manual_bg_pids.drain() {
-        let _ = backend.set_background(pid, false);
-    }
-
+    // Undo everything this instance changed, on every exit path.
+    rt.shutdown();
     term_guard.leave();
-    Ok(())
+    result
 }
 
 fn handle_key(
     code: KeyCode,
     mods: KeyModifiers,
     state: &mut TuiState,
-    gov: &mut Governor,
-    backend: &dyn PlatformBackend,
+    rt: &mut Runtime,
 ) -> bool {
     if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
         return false;
@@ -596,33 +498,27 @@ fn handle_key(
         KeyCode::Char('1') => state.tab = TuiTab::Dashboard,
         KeyCode::Char('2') => state.tab = TuiTab::Config,
         KeyCode::Char('m') | KeyCode::Char('M') => {
-            let prev = state.mode;
-            let next = prev.next();
-            if prev == TuiMode::Active && next != TuiMode::Active {
-                let mut clean_cfg = state.cfg.clone();
-                clean_cfg.dry_run = false;
-                gov.cleanup(&clean_cfg, backend);
-            }
+            let next = state.mode.next();
+            rt.set_mode(next.to_mode());
             state.mode = next;
-            state.push_event(
-                EventKind::System,
-                format!("Switched mode to {}", next.label()),
-            );
             state.set_status(format!("Mode -> {}", next.label()), next.color());
         }
         _ => match state.tab {
-            TuiTab::Dashboard => handle_dashboard_key(code, state, backend),
-            TuiTab::Config => handle_config_key(code, state),
+            TuiTab::Dashboard => handle_dashboard_key(code, state, rt),
+            TuiTab::Config => handle_config_key(code, state, rt),
         },
     }
     true
 }
 
-fn handle_dashboard_key(
-    code: KeyCode,
-    state: &mut TuiState,
-    backend: &dyn PlatformBackend,
-) {
+fn run_command(state: &mut TuiState, rt: &mut Runtime, cmd: Command) {
+    match rt.command(cmd) {
+        Ok(msg) => state.set_status(msg, Color::Green),
+        Err(e) => state.set_status(e, Color::Red),
+    }
+}
+
+fn handle_dashboard_key(code: KeyCode, state: &mut TuiState, rt: &mut Runtime) {
     match code {
         KeyCode::Char('/') => {
             state.search_mode = true;
@@ -661,53 +557,22 @@ fn handle_dashboard_key(
                 if is_prot && !is_demoted {
                     state.set_status(format!("Refused: {} ({}) is protected", name, pid), Color::Red);
                 } else {
-                    let enable = !is_demoted;
-                    match backend.set_background(pid, enable) {
-                        Ok(()) => {
-                            if enable {
-                                state.manual_bg_pids.insert(pid);
-                            } else {
-                                state.manual_bg_pids.remove(&pid);
-                            }
-                            let msg = format!(
-                                "Manual {} QoS: {} ({})",
-                                if enable { "background" } else { "normal" },
-                                name,
-                                pid
-                            );
-                            state.push_event(EventKind::Manual, msg.clone());
-                            state.set_status(msg, Color::Magenta);
-                        }
-                        Err(e) => state.set_status(e, Color::Red),
-                    }
+                    run_command(state, rt, Command::Background { pid, on: !is_demoted });
                 }
             }
         }
         KeyCode::Char(' ') | KeyCode::Char('x') => {
             if let Some((pid, name, is_prot, _, is_stopped)) = state.selected_process() {
                 if is_stopped {
-                    match backend.resume_process(pid) {
-                        Ok(()) => {
-                            let msg = format!("Manual SIGCONT resumed {} ({})", name, pid);
-                            state.push_event(EventKind::Restore, msg.clone());
-                            state.set_status(msg, Color::Green);
-                        }
-                        Err(e) => state.set_status(e, Color::Red),
-                    }
+                    run_command(state, rt, Command::Resume { pid });
                 } else if is_prot {
                     state.set_status(format!("Refused: {} ({}) is protected", name, pid), Color::Red);
                 } else {
-                    match backend.pause_process(pid) {
-                        Ok(()) => {
-                            let msg = format!("Manual SIGSTOP paused {} ({})", name, pid);
-                            state.push_event(EventKind::Manual, msg.clone());
-                            state.set_status(msg, Color::Yellow);
-                        }
-                        Err(e) => state.set_status(e, Color::Red),
-                    }
+                    run_command(state, rt, Command::Pause { pid, secs: MANUAL_PAUSE_SECS });
                 }
             }
         }
+        KeyCode::Char('u') | KeyCode::Char('U') => run_command(state, rt, Command::RestoreAll),
         KeyCode::Char('p') | KeyCode::Char('P') => {
             if let Some((_, name, _, _, _)) = state.selected_process() {
                 if let Some(pos) = state
@@ -726,6 +591,7 @@ fn handle_dashboard_key(
                     state.push_event(EventKind::Manual, msg.clone());
                     state.set_status(msg, Color::Cyan);
                 }
+                rt.set_config(state.cfg.clone());
             }
         }
         KeyCode::Char('c') => {
@@ -735,7 +601,7 @@ fn handle_dashboard_key(
     }
 }
 
-fn handle_config_key(code: KeyCode, state: &mut TuiState) {
+fn handle_config_key(code: KeyCode, state: &mut TuiState, rt: &mut Runtime) {
     const NUM_FIELDS: usize = 8;
     match code {
         KeyCode::Down | KeyCode::Char('j') => {
@@ -746,9 +612,11 @@ fn handle_config_key(code: KeyCode, state: &mut TuiState) {
         }
         KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('l') => {
             adjust_cfg_field(state, 1.0);
+            rt.set_config(state.cfg.clone());
         }
         KeyCode::Left | KeyCode::Char('-') | KeyCode::Char('h') => {
             adjust_cfg_field(state, -1.0);
+            rt.set_config(state.cfg.clone());
         }
         KeyCode::Char('w') | KeyCode::Char('W') => {
             if let Some(path) = config::default_config_path() {
@@ -766,6 +634,7 @@ fn handle_config_key(code: KeyCode, state: &mut TuiState) {
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
             state.cfg = Config::default();
+            rt.set_config(state.cfg.clone());
             state.set_status("Reset config to defaults".to_string(), Color::Yellow);
         }
         _ => {}
@@ -778,7 +647,9 @@ fn adjust_cfg_field(state: &mut TuiState, dir: f64) {
         0 => next.cpu_release = (next.cpu_release + dir * 1.0).clamp(10.0, 95.0),
         1 => next.cpu_soft = (next.cpu_soft + dir * 1.0).clamp(15.0, 99.0),
         2 => next.cpu_high = (next.cpu_high + dir * 1.0).clamp(20.0, 100.0),
-        3 => next.cpu_cap = (next.cpu_cap + dir * 1.0).clamp(25.0, 100.0),
+        3 => {
+            next.min_governable_cpu_pct = (next.min_governable_cpu_pct + dir * 1.0).clamp(0.0, 90.0)
+        }
         4 => next.ram_high_pct = (next.ram_high_pct + dir * 1.0).clamp(20.0, 99.0),
         5 => next.ram_critical_pct = (next.ram_critical_pct + dir * 1.0).clamp(25.0, 99.5),
         6 => next.disk_min_free_gb = (next.disk_min_free_gb + dir * 0.5).clamp(1.0, 200.0),
@@ -854,13 +725,17 @@ fn draw_ui(f: &mut Frame<'_>, state: &mut TuiState) {
 }
 
 fn draw_header(f: &mut Frame<'_>, area: Rect, state: &TuiState) {
-    let daemon_span = if let Some(pid) = state.ext_daemon_pid {
-        Span::styled(
-            format!(" DAEMON:{} ", pid),
+    let daemon_span = match &state.authority {
+        Authority::Governing => Span::styled(
+            " GOVERNING ",
             Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled(" DAEMON:OFF ", Style::default().fg(Color::Gray).bg(Color::DarkGray))
+        ),
+        Authority::Deferred { pid, role } => Span::styled(
+            format!(" FOLLOWING {}:{} ", role.to_uppercase(), pid),
+            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Authority::Simulating => Span::styled(" NO CHANGES ", Style::default().fg(Color::Gray).bg(Color::DarkGray)),
+        Authority::Observing => Span::styled(" OBSERVING ", Style::default().fg(Color::Gray).bg(Color::DarkGray)),
     };
 
     let zone_col = zone_color(state.zone);
@@ -990,12 +865,11 @@ fn draw_cpu_panel(f: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let th_line = Paragraph::new(Line::from(vec![
         Span::styled(
             format!(
-                "rel:{:.0}% soft:{:.0}% high:{:.0}% cap:{:.0}%  duty:{:.0}%",
-                state.cfg.cpu_release,
-                state.cfg.cpu_soft,
-                state.cfg.cpu_high,
-                state.cfg.cpu_cap,
-                state.throttle_ratio * 100.0
+                "yours {:.0}% (governable {:.0}%) · system/other {:.0}%  busy≥{:.0}%",
+                state.own_cpu,
+                state.governable_cpu,
+                state.other_cpu,
+                state.cfg.cpu_soft
             ),
             Style::default().fg(Color::Gray),
         ),
@@ -1116,7 +990,7 @@ fn draw_guard_panel(f: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let lines = vec![
         gpu_line,
         Line::from(vec![
-            Span::styled("Demoted:   ", Style::default().fg(Color::Gray)),
+            Span::styled("Slowed:    ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{}", state.demoted_count),
                 Style::default().fg(if state.demoted_count > 0 { Color::Yellow } else { Color::Green }),
@@ -1169,16 +1043,16 @@ fn draw_processes_panel(f: &mut Frame<'_>, area: Rect, state: &mut TuiState) {
         let vis = state.visible_rows();
         vis.into_iter()
             .map(|r| {
-                let (st_lbl, st_col) = if r.is_emergency_paused {
-                    ("MEM-PAUSE", Color::Red)
+                let (st_lbl, st_col) = if r.paused {
+                    ("PAUSED", Color::Red)
                 } else if r.sample.is_stopped {
                     ("STOPPED", Color::Red)
-                } else if r.is_demoted {
-                    ("BG-QoS", Color::Yellow)
-                } else if r.is_protected {
-                    ("SHIELD", Color::Cyan)
+                } else if r.demoted {
+                    ("SLOWED", Color::Yellow)
+                } else if !r.eligibility.is_governable() {
+                    ("PROTECTED", Color::Cyan)
                 } else {
-                    ("NORMAL", Color::DarkGray)
+                    ("normal", Color::DarkGray)
                 };
                 (
                     r.sample.pid,
@@ -1281,8 +1155,8 @@ fn draw_events_panel(f: &mut Frame<'_>, area: Rect, state: &TuiState) {
         .take(50)
         .map(|ev| {
             let col = match ev.kind {
-                EventKind::Emergency => Color::Red,
-                EventKind::Intervention => Color::Yellow,
+                EventKind::Alert | EventKind::Error => Color::Red,
+                EventKind::Action => Color::Yellow,
                 EventKind::Restore => Color::Green,
                 EventKind::DryRun => Color::Cyan,
                 EventKind::Manual => Color::Magenta,
@@ -1306,11 +1180,11 @@ fn draw_config_tab(f: &mut Frame<'_>, area: Rect, state: &TuiState) {
 
     let items_data = [
         ("CPU Release Hysteresis (%)", format!("{:.1}%", state.cfg.cpu_release)),
-        ("CPU Soft QoS / E-Cores (%)", format!("{:.1}%", state.cfg.cpu_soft)),
-        ("CPU High Duty-Cycle (%)", format!("{:.1}%", state.cfg.cpu_high)),
-        ("CPU Hard Cap Ceiling (%)", format!("{:.1}%", state.cfg.cpu_cap)),
+        ("CPU Busy: lower batch priority (%)", format!("{:.1}%", state.cfg.cpu_soft)),
+        ("CPU Saturated (%)", format!("{:.1}%", state.cfg.cpu_high)),
+        ("Min governable CPU to act (%)", format!("{:.1}%", state.cfg.min_governable_cpu_pct)),
         ("RAM High Watermark (%)", format!("{:.1}%", state.cfg.ram_high_pct)),
-        ("RAM Critical Pause (%)", format!("{:.1}%", state.cfg.ram_critical_pct)),
+        ("RAM Critical Alert (%)", format!("{:.1}%", state.cfg.ram_critical_pct)),
         ("Root SSD Min Free (GB)", format!("{:.1} GB", state.cfg.disk_min_free_gb)),
         ("Control Loop Tick (ms)", format!("{} ms", state.cfg.tick_ms)),
     ];
@@ -1370,7 +1244,7 @@ fn draw_config_tab(f: &mut Frame<'_>, area: Rect, state: &TuiState) {
 
 fn draw_footer(f: &mut Frame<'_>, area: Rect, state: &TuiState) {
     let keybinds = if state.tab == TuiTab::Dashboard {
-        "[q]Quit  [m]Mode  [Tab]Config  [/]Search  [f]Filter  [s]Sort  [b]BG-QoS  [Space]Pause/Resume  [p]Protect  [?]Help"
+        "[q]Quit  [m]Mode  [Tab]Config  [/]Search  [f]Filter  [s]Sort  [b]Slow/Restore  [Space]Pause 30s/Resume  [u]Undo all  [p]Protect  [?]Help"
     } else {
         "[q]Quit  [m]Mode  [Tab]Dashboard  [↑/↓]Select  [-/+]Adjust  [w]Save config.toml  [r]Reset  [?]Help"
     };
@@ -1402,15 +1276,16 @@ fn draw_help_overlay(f: &mut Frame<'_>, area: Rect) {
         )),
         Line::from(""),
         Line::from("  q / Ctrl+C       Quit cleanly (restores any governed processes)"),
-        Line::from("  m                Cycle mode: DRY-RUN -> ACTIVE GUARD -> OBSERVE"),
+        Line::from("  m                Cycle mode: DRY-RUN -> ACTIVE -> OBSERVE"),
         Line::from("  Tab / 1 / 2      Switch between Dashboard and Live Config tabs"),
         Line::from("  ↑/↓ or j/k       Move process / config selection"),
         Line::from("  /                Search processes by name, PID, or path (Esc clears)"),
         Line::from("  f                Cycle process filter (All / Active / Governed / Protected)"),
         Line::from("  s                Cycle sort order (CPU% / RAM / PID / Name)"),
-        Line::from("  b                Toggle Background QoS / E-cores on selected process"),
-        Line::from("  Space / x        Pause (SIGSTOP) or Resume (SIGCONT) selected process"),
+        Line::from("  b                Slow down (lower priority) / restore selected process"),
+        Line::from("  Space / x        Pause selected process for 30 s (auto-resume) / resume it"),
         Line::from("  p                Add/remove selected process name from protected list"),
+        Line::from("  u                Undo every change resguard has made"),
         Line::from("  c                Clear event log"),
         Line::from(""),
         Line::from(Span::styled("Press Esc or ? to close", Style::default().fg(Color::DarkGray))),
@@ -1430,7 +1305,6 @@ fn zone_color(zone: Zone) -> Color {
         Zone::Normal => Color::Green,
         Zone::Soft => Color::Yellow,
         Zone::High => Color::Magenta,
-        Zone::Cap => Color::Red,
         Zone::MemoryEmergency => Color::LightRed,
     }
 }
@@ -1443,99 +1317,4 @@ fn pct_color(val: f64, warn: f64, crit: f64) -> Color {
     } else {
         Color::Green
     }
-}
-
-fn detect_external_daemon(self_pid: u32, procs: &[ProcessSample]) -> Option<u32> {
-    for p in procs {
-        if p.pid == self_pid {
-            continue;
-        }
-        let base_name = p.name.rsplit(['/', '\\']).next().unwrap_or(&p.name);
-        let base_exe = p.exe_path.rsplit(['/', '\\']).next().unwrap_or("");
-        if base_name.eq_ignore_ascii_case("resguard") || base_exe.eq_ignore_ascii_case("resguard") {
-            return Some(p.pid);
-        }
-    }
-    None
-}
-
-fn classify_event(ev: &str) -> EventKind {
-    if ev.contains("[DRY-RUN]") {
-        EventKind::DryRun
-    } else if ev.contains("MEM/SSD guard paused") {
-        EventKind::Emergency
-    } else if ev.contains("Restored") || ev.contains("resumed") {
-        EventKind::Restore
-    } else {
-        EventKind::Intervention
-    }
-}
-
-#[cfg(unix)]
-fn local_hms() -> String {
-    use std::ffi::{c_int, c_long};
-
-    #[repr(C)]
-    struct Ctm {
-        tm_sec: c_int,
-        tm_min: c_int,
-        tm_hour: c_int,
-        _rest: [u8; 44],
-    }
-
-    impl Default for Ctm {
-        fn default() -> Self {
-            Self {
-                tm_sec: 0,
-                tm_min: 0,
-                tm_hour: 0,
-                _rest: [0u8; 44],
-            }
-        }
-    }
-
-    extern "C" {
-        fn time(tloc: *mut c_long) -> c_long;
-        fn localtime_r(timep: *const c_long, result: *mut Ctm) -> *mut Ctm;
-    }
-
-    unsafe {
-        let mut now: c_long = 0;
-        time(&mut now);
-        let mut tm = Ctm::default();
-        if localtime_r(&now, &mut tm).is_null() {
-            return "00:00:00".to_string();
-        }
-        format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
-    }
-}
-
-#[cfg(windows)]
-fn local_hms() -> String {
-    #[repr(C)]
-    #[derive(Default)]
-    struct SystemTime {
-        w_year: u16,
-        w_month: u16,
-        w_day_of_week: u16,
-        w_day: u16,
-        w_hour: u16,
-        w_minute: u16,
-        w_second: u16,
-        w_milliseconds: u16,
-    }
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetLocalTime(lp_system_time: *mut SystemTime);
-    }
-
-    let mut st = SystemTime::default();
-    unsafe { GetLocalTime(&mut st) };
-    format!("{:02}:{:02}:{:02}", st.w_hour, st.w_minute, st.w_second)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn local_hms() -> String {
-    "00:00:00".to_string()
 }

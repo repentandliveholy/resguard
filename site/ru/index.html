@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>resguard — Универсальный Rust-контроллер ресурсов, TUI и RS Dash</title>
-  <meta name="description" content="Лёгкий Rust-демон и панель управления ресурсами (CPU, RAM, Swap, SSD) с TUI-интерфейсом и десктопным приложением RS Dash." />
+  <meta name="description" content="Лёгкий Rust-монитор ресурсов, который сохраняет отзывчивость системы: понижает приоритет тяжёлых задач при длительной загрузке CPU и заранее предупреждает о нехватке RAM, свопа или места на диске — никогда не замораживая приложения." />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="/style.css" />
 </head>
@@ -19,6 +19,7 @@
         <a href="#install">Установка</a>
         <a href="#downloads">Скачать</a>
         <a href="#features">Возможности</a>
+        <a href="#safety">Безопасность</a>
         <a href="#service">Сервис и автообновление</a>
         <a href="https://github.com/repentandliveholy/resguard" target="_blank" rel="noopener">GitHub</a>
         <div class="lang-switch" aria-label="Язык">
@@ -33,33 +34,36 @@
   <main class="wrap">
     <section class="hero" id="install">
       <div class="badge">Rust · macOS · Linux · Windows · Автообновление</div>
-      <h1>Защита от 100% зависаний CPU и переполнения SSD свопом</h1>
+      <h1>Система остаётся отзывчивой под нагрузкой — без зависших приложений</h1>
       <p class="lead">
-        <strong>resguard</strong> — универсальный монитор и регулятор ресурсов на Rust с интерактивным
-        терминальным дашбордом (<code>rs-tui</code>) и нативным десктоп-приложением (<strong>RS Dash</strong>).
+        <strong>resguard</strong> — компактная утилита на Rust, которая при длительной загрузке процессора незаметно понижает приоритет
+        тяжёлых пакетных задач (компиляторы, тесты, сборщики, скрипты) и заранее предупреждает, когда заканчиваются память, своп
+        или место на диске. В комплекте — терминальный дашборд (<code>rs-tui</code>) и нативное десктоп-приложение (<strong>RS Dash</strong>).
       </p>
 
       <div class="install-card">
         <div class="install-tabs">
           <button class="tab-btn active" data-cmd="curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh">macOS / Linux</button>
           <button class="tab-btn" data-cmd="curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh -s -- --service --with-gui">Установка + Сервис + GUI</button>
-          <button class="tab-btn" data-cmd="irm https://resguard.repentandliveholy.org/install.ps1 | iex">Windows (PowerShell)</button>
+          <button class="tab-btn" data-cmd="irm https://resguard.repentandliveholy.org/install.ps1 | iex" data-win="1">Windows (PowerShell)</button>
         </div>
         <div class="cmd-row">
           <code id="install-cmd">curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh</code>
           <button class="copy-btn" id="copy-btn">Копировать</button>
         </div>
+        <p class="install-alt" id="win-alt" hidden>Нужен обычный установщик? <a href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-setup-windows-x86_64.exe">Скачайте установщик для Windows (.exe)</a> — для текущего пользователя, без прав администратора, с автообновлением.</p>
       </div>
 
       <div class="cta-row">
         <a class="btn btn-primary" href="#downloads">Скачать бинарники</a>
+        <a class="btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-setup-windows-x86_64.exe">Установщик Windows (.exe)</a>
         <a class="btn" href="https://github.com/repentandliveholy/resguard" target="_blank" rel="noopener">Исходный код на GitHub</a>
       </div>
     </section>
 
     <section id="downloads">
       <h2>Прямое скачивание бинарников</h2>
-      <p class="sec-sub">Собрано в GitHub Actions CI с проверкой контрольных сумм SHA256 (<code>resguard</code>, <code>rs-tui</code>, <code>rs-dash</code>).</p>
+      <p class="sec-sub">Собрано в GitHub Actions CI с проверкой контрольных сумм SHA256 (<code>resguard</code>, <code>rs-tui</code>, <code>rs-dash</code>). Для Windows проще всего воспользоваться установщиком.</p>
       <div class="dl-grid">
         <div class="dl-card">
           <div>
@@ -96,9 +100,17 @@
           </div>
           <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-linux-arm64.tar.gz">Скачать .tar.gz</a>
         </div>
+        <div class="dl-card dl-card-primary">
+          <div>
+            <div class="os">Установщик Windows <span class="pill pill-green">Рекомендуется</span></div>
+            <div class="meta">resguard-setup-windows-x86_64.exe</div>
+            <div class="note">Для текущего пользователя, без прав администратора, с автообновлением. Добавляет RS Dash в меню «Пуск» и может запускать resguard в фоне при входе в систему.</div>
+          </div>
+          <a class="dl-btn dl-btn-primary" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-setup-windows-x86_64.exe">Скачать установщик (.exe)</a>
+        </div>
         <div class="dl-card">
           <div>
-            <div class="os">Windows x86_64</div>
+            <div class="os">Windows x86_64 (портативная версия)</div>
             <div class="meta">x86_64-pc-windows-msvc (.zip)</div>
           </div>
           <a class="dl-btn" href="https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-windows-x86_64.zip">Скачать .zip</a>
@@ -108,19 +120,43 @@
 
     <section id="features">
       <h2>Три режима работы</h2>
-      <p class="sec-sub">Используйте фоновый CLI-демон, терминальный TUI или графическое окно — все работают на едином ядре.</p>
+      <p class="sec-sub">Используйте фоновый CLI-демон, терминальный TUI или графическое окно — все работают на едином ядре. Одновременно работает только один регулятор: TUI и RS Dash подключаются к фоновому демону, если он запущен.</p>
       <div class="grid-3">
         <div class="card">
           <h3>CLI и демон <span class="pill pill-green">resguard</span></h3>
-          <p>Минимальная нагрузка (&lt;0.2% CPU). 3-зонный регулятор CPU (Soft QoS, High Duty-Cycle, Hard Cap) и аварийная пауза при нехватке RAM/SSD.</p>
+          <p>Минимальная нагрузка (&lt;0.2% CPU). При длительной загрузке CPU понижает приоритет тяжёлых консольных задач: фоновый QoS (E-ядра) в macOS, nice/вес cgroup в Linux, приоритет «ниже среднего» в Windows. При нехватке RAM, свопа или места на диске присылает уведомление с именем самого прожорливого процесса. Также показывает, какая доля нагрузки приходится на процессы, которыми он управлять не может (системные, других пользователей).</p>
         </div>
         <div class="card">
           <h3>Терминальный TUI <span class="pill pill-cyan">rs-tui</span></h3>
-          <p>Интерактивная панель в стиле <code>htop</code>/<code>btop</code> (<code>resguard --tui</code>): графики, поиск процессов, QoS/пауза/защита и настройка порогов.</p>
+          <p>Интерактивная панель в стиле <code>htop</code>/<code>btop</code> (<code>resguard --tui</code>): графики, поиск процессов, список защищённых процессов и настройка порогов; заодно служит пультом управления фоновым демоном.</p>
         </div>
         <div class="card">
           <h3>Десктоп-приложение <span class="pill pill-purple">RS Dash</span></h3>
-          <p>Нативный интерфейс на <code>eframe</code>/<code>egui</code>: графики в реальном времени, лог событий, просмотр логов демона и редактор <code>config.toml</code>.</p>
+          <p>Нативный интерфейс на <code>eframe</code>/<code>egui</code>: графики в реальном времени, лог событий, просмотр логов демона и редактор <code>config.toml</code>. Если фоновый демон уже запущен, RS Dash становится его панелью, а не вторым регулятором.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="safety">
+      <h2>Гарантии безопасности</h2>
+      <p class="sec-sub">Главный принцип: замедлить задачу допустимо, заморозить — никогда.</p>
+      <div class="grid-2">
+        <div class="card">
+          <h3>По умолчанию ничего не ставится на паузу <span class="pill pill-green">только предупреждения</span></h3>
+          <p>При нехватке памяти, свопа или места на диске resguard присылает уведомление с именем самого прожорливого процесса. Пауза включается только явно (<code>--emergency-pause</code>), затрагивает один процесс за раз и автоматически снимается примерно через 20&nbsp;секунд.</p>
+        </div>
+        <div class="card">
+          <h3>Приложения и система не затрагиваются <span class="pill pill-cyan">только пакетные задачи</span></h3>
+          <p>Приоритет понижается только у тяжёлых консольных и пакетных задач. Графические приложения (всё, что внутри <code>.app</code>-бандла в macOS), системные процессы, терминалы и оболочки, а также ваш список защищённых процессов не трогаются никогда.</p>
+        </div>
+        <div class="card">
+          <h3>Любое изменение обратимо <span class="pill pill-amber">журнал</span></h3>
+          <p>Каждое изменение приоритета записывается в журнал и откатывается при выходе, при следующем запуске после сбоя или по команде:</p>
+          <pre>resguard --restore</pre>
+        </div>
+        <div class="card">
+          <h3>Только один регулятор <span class="pill pill-purple">lock-файл</span></h3>
+          <p>Lock-файл гарантирует, что работает только один регулятор. RS Dash и <code>rs-tui</code> выступают панелью и пультом управления фоновым демоном, а не конкурируют с ним.</p>
         </div>
       </div>
     </section>
@@ -153,11 +189,13 @@ resguard --update
   <script>
     const cmdEl = document.getElementById('install-cmd');
     const copyBtn = document.getElementById('copy-btn');
+    const winAlt = document.getElementById('win-alt');
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         cmdEl.textContent = btn.dataset.cmd;
+        winAlt.hidden = !btn.dataset.win;
       });
     });
     copyBtn.addEventListener('click', async () => {

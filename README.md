@@ -1,21 +1,22 @@
 # resguard
 
-Universal, zero-dependency Rust resource watcher & governor that keeps your machine responsive and prevents 100% CPU lockups or low-SSD swap crashes.
+Keeps your desktop responsive under heavy load by **de-prioritizing heavy batch work** (compilers, test runners, build tools, scripts), and warns you before memory, swap or a nearly-full disk get dangerous. Zero-dependency Rust daemon, plus a terminal UI and a desktop dashboard.
 
-## Features
+**Design rule: slowing something down is acceptable; freezing it never is.**
 
-- **Zero external crate dependencies** — builds offline in seconds into a ~460 KB native binary with minimal runtime overhead (< 0.2% CPU, ~2–4 MB RAM).
-- **Universal** — works on any runaway user workload (compilers, browsers, video encoders, local LLMs, containers, scripts), not tied to any specific stack.
-- **3-Zone CPU Governor (`75% / 95% / 97%` defaults with `68%` hysteresis):**
-  - `< 68%` (after cooldown): restores normal process QoS.
-  - `75% – 95%` (**Soft**): demotes heavy background consumers to `PRIO_DARWIN_BG` (Apple Silicon E-cores + background I/O) — processes keep running smoothly without starving your UI.
-  - `95% – 97%+` (**High / Cap**): applies proportional `SIGSTOP`/`SIGCONT` duty-cycle pulsing across top CPU consumers (and sibling worker trees) so total CPU stays under ceiling.
-- **RAM + Swap + Low-SSD Emergency Guard:**
-  - Tracks RAM %, Swap usage, and free space on `/`.
-  - If free SSD space drops below `disk_min_free_gb` (default `8 GB`) while swap/RAM pressure rises (or RAM hits `92%+`), pauses the largest non-protected allocator (`SIGSTOP`) and sends a notification before swap exhausts the disk.
-- **Safety First:**
-  - Never touches PID `0/1`, other users' processes (unless root), your ancestor shell/terminal chain, OS UI/audio services, or configured protected apps.
-  - Failsafe cleanup on `SIGINT` / `SIGTERM` / `SIGHUP` immediately resumes (`SIGCONT`) any paused processes and restores QoS.
+## What it does
+
+- **Sustained CPU load** (default ≥ 75% for 1 s): lowers the priority of the heaviest *governable* processes — macOS background QoS (E-cores), Linux cgroup weight / `nice`, Windows below-normal priority. They keep running, just behind your apps. Restored once the machine is calm (with a minimum dwell to avoid flapping).
+- **Load it can't help with:** if most CPU comes from the kernel, system services or other users, resguard says so and does nothing, instead of squeezing whatever it can see.
+- **Memory / swap / low disk:** alerts (log + desktop notification naming the biggest allocator). Pausing is **opt-in** (`emergency_pause = true`): one process at a time, never an app, auto-resumed after `emergency_pause_secs` (default 20 s).
+
+## Safety guarantees
+
+- **Never pauses anything for CPU load.** (v0.1 SIGSTOP-pulsed processes to hold CPU under a hard cap; that could freeze apps and was removed in v0.2.)
+- **Never touches** GUI apps (anything inside a macOS `.app` bundle), system binaries, terminals and shells, its own terminal chain, other users' processes, or names on the protect list.
+- **Every change is recorded** in a ledger and undone on exit, on restart after a crash, or on demand: `resguard --restore`.
+- **One governor at a time.** The daemon, `rs-tui` and RS Dash share one lock; dashboards follow the running daemon and forward your actions to it.
+- Manual pauses from the TUI/GUI are always time-limited (30 s) and refused for protected processes.
 
 ## Quick Install
 
@@ -27,7 +28,10 @@ curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh
 curl -fsSL https://resguard.repentandliveholy.org/install.sh | sh -s -- --service --with-gui
 ```
 
-**Windows (PowerShell):**
+**Windows:** download the installer (per-user, no admin, self-updating):
+https://github.com/repentandliveholy/resguard/releases/latest/download/resguard-setup-windows-x86_64.exe
+
+or use PowerShell:
 
 ```powershell
 irm https://resguard.repentandliveholy.org/install.ps1 | iex
@@ -40,6 +44,7 @@ irm https://resguard.repentandliveholy.org/install.ps1 | iex
 resguard --install-service
 resguard --service-status
 resguard --uninstall-service
+resguard --restore            # undo every change resguard has made
 
 # Check or apply updates from GitHub Releases (with SHA256 verification)
 resguard --check-update
@@ -70,7 +75,7 @@ resguard --tui    # or: resguard --dash / resguard -t
 rs-tui
 ```
 
-Keybindings: `m` (cycle `DRY-RUN` / `ACTIVE GUARD` / `OBSERVE`), `Tab` (Dashboard / Live Config), `/` (search), `f` (filter), `s` (sort), `b` (toggle BG QoS), `Space` (Pause/Resume), `p` (Protect/Unprotect), `w` (save `config.toml`), `?` (help), `q` (quit & restore).
+Keybindings: `m` (cycle `DRY-RUN` / `ACTIVE` / `OBSERVE`), `Tab` (Dashboard / Live Config), `/` (search), `f` (filter), `s` (sort), `b` (slow down / restore), `Space` (pause 30 s / resume), `u` (undo all changes), `p` (protect/unprotect), `w` (save `config.toml`), `?` (help), `q` (quit & restore).
 
 ## RS Dash (Resguard Dashboard App)
 
@@ -86,10 +91,11 @@ open "target/release/RS Dash.app"
 ```
 
 Features:
-- **Live Dashboard**: CPU, Memory/Pressure, Swap, Root SSD free space, GPU %, sparklines, and interactive time-series charts with threshold overlays.
-- **Safe Daemon Coexistence**: Automatically detects if a background `resguard` daemon is running and defaults to **Monitor (Dry-Run)** mode; switch to **Active Guard**, **Dry-Run**, or **Observe** anytime.
-- **Process Explorer**: Search, filter, and sort live processes with one-click **Protect/Unprotect**, **BG QoS**, and **Pause/Resume** controls.
-- **Events, Daemon Log Tail & Settings**: Inspect live governor interventions, tail `/tmp/resguard.log`, and edit/save thresholds to `~/.config/resguard/config.toml`.
+- **Status in one sentence:** who is in charge (the background service, RS Dash, or nobody) and what is currently slowed or paused, with *Undo all changes*.
+- **Where the CPU load comes from:** batch work resguard may slow down vs. your apps vs. system/kernel/other users.
+- **Processes:** search, filter and sort; slow down / restore / pause 30 s / resume. Each protected process shows why it is protected.
+- **Activity & service log**, and **Settings** saved to `~/.config/resguard/config.toml` — the running service reloads it automatically.
+- Starts in **Dry-run**; when the background service is running, RS Dash follows it instead of governing itself.
 
 ## Quick Start
 
@@ -101,31 +107,25 @@ Features:
    ```bash
    resguard --init-config
    ```
-3. Run actively (default thresholds: soft `75%`, high `95%`, cap `97%`, SSD min `8 GB`):
+3. Run actively (defaults: busy `75%`, saturated `95%`, SSD min `8 GB`):
    ```bash
    resguard
    ```
 4. Custom thresholds & extra protected apps:
    ```bash
-   resguard --soft 70 --high 90 --cap 95 --protect "Docker,Ollama"
+   resguard --soft 70 --high 90 --protect "Docker,Ollama"
    ```
 
 ## Run in Background on macOS (`launchd`)
 
 ```bash
-sudo cp target/release/resguard /usr/local/bin/resguard
-cp launchd/com.resguard.agent.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.resguard.agent.plist
-```
-
-To stop:
-```bash
-launchctl unload ~/Library/LaunchAgents/com.resguard.agent.plist
+resguard --install-service     # LaunchAgent running `resguard --service`, logs to /tmp/resguard.log
+resguard --uninstall-service
 ```
 
 ## Cross-Platform Architecture
 
-All policy logic (`src/governor.rs`, `src/config.rs`, `src/model.rs`) is OS-agnostic behind `PlatformBackend` (`src/platform/mod.rs`):
+Policy (`src/governor.rs`) and the shared governor loop used by the daemon, TUI and GUI (`src/runtime.rs`, with lock/ledger/status/inbox files in `src/control.rs`) are OS-agnostic behind `PlatformBackend` (`src/platform/mod.rs`):
 
 - `src/platform/macos.rs`: Mach `host_statistics64`, `libproc`, `sysctlbyname`, `statvfs`, `PRIO_DARWIN_BG`, `SIGSTOP`/`SIGCONT`.
 - `src/platform/linux.rs`: `/proc/stat`, `/proc/meminfo`, `/proc/pressure/memory` (PSI), `statvfs`, delegated `cgroups v2` (`cpu.weight`/`io.weight`) with `nice` fallback, `SIGSTOP`/`SIGCONT`.

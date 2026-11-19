@@ -13,7 +13,6 @@ pub enum ColorMode {
 pub struct Config {
     pub cpu_soft: f64,
     pub cpu_high: f64,
-    pub cpu_cap: f64,
     pub cpu_release: f64,
     pub soft_sustain_ms: u64,
     pub release_cooldown_ms: u64,
@@ -24,6 +23,13 @@ pub struct Config {
     pub tick_ms: u64,
     pub min_proc_cpu_pct: f64,
     pub min_proc_rss_mb: f64,
+    /// Below this much CPU (% of machine) coming from governable processes, resguard does
+    /// not act: the load is coming from somewhere it cannot help with.
+    pub min_governable_cpu_pct: f64,
+    /// Opt-in: under a memory/swap/disk emergency, pause the largest governable process
+    /// for at most `emergency_pause_secs`.
+    pub emergency_pause: bool,
+    pub emergency_pause_secs: u64,
     pub dry_run: bool,
     pub once: bool,
     pub notify: bool,
@@ -33,6 +39,8 @@ pub struct Config {
     pub color: ColorMode,
     pub log_file: Option<String>,
     pub protect_names: Vec<String>,
+    /// Running as the background service (Windows: detach console, log to file).
+    pub service: bool,
 }
 
 impl Default for Config {
@@ -40,7 +48,6 @@ impl Default for Config {
         Self {
             cpu_soft: 75.0,
             cpu_high: 95.0,
-            cpu_cap: 97.0,
             cpu_release: 68.0,
             soft_sustain_ms: 1000,
             release_cooldown_ms: 5000,
@@ -51,6 +58,9 @@ impl Default for Config {
             tick_ms: 500,
             min_proc_cpu_pct: 8.0,
             min_proc_rss_mb: 256.0,
+            min_governable_cpu_pct: 15.0,
+            emergency_pause: false,
+            emergency_pause_secs: 20,
             dry_run: false,
             once: false,
             notify: true,
@@ -60,6 +70,7 @@ impl Default for Config {
             color: ColorMode::Auto,
             log_file: None,
             protect_names: default_protected_names(),
+            service: false,
         }
     }
 }
@@ -105,6 +116,8 @@ pub fn default_protected_names() -> Vec<String> {
         // Interactive shells & terminals (prevent locking out user input)
         "Terminal",
         "iTerm2",
+        "Warp",
+        "warp-oss",
         "Alacritty",
         "kitty",
         "WezTerm",
@@ -167,6 +180,7 @@ pub enum CliAction {
     InstallService,
     UninstallService,
     ServiceStatus,
+    Restore,
     ExitOk,
 }
 
@@ -174,7 +188,6 @@ pub fn parse_args_and_load() -> Result<CliAction, String> {
     let args: Vec<String> = env::args().skip(1).collect();
 
     let mut config_path: Option<PathBuf> = default_config_path();
-    let mut explicit_config = false;
     let mut init_config = false;
 
     // First pass: check help/version/config path/init-config
@@ -198,11 +211,11 @@ pub fn parse_args_and_load() -> Result<CliAction, String> {
             "--install-service" | "install-service" => return Ok(CliAction::InstallService),
             "--uninstall-service" | "uninstall-service" => return Ok(CliAction::UninstallService),
             "--service-status" | "service-status" => return Ok(CliAction::ServiceStatus),
+            "--restore" | "restore" => return Ok(CliAction::Restore),
             "--config" => {
                 i += 1;
                 let p = args.get(i).ok_or("--config requires a path")?;
                 config_path = Some(PathBuf::from(p));
-                explicit_config = true;
             }
             _ => {}
         }
@@ -216,7 +229,31 @@ pub fn parse_args_and_load() -> Result<CliAction, String> {
         return Ok(CliAction::ExitOk);
     }
 
+    let (cfg, tui_mode) = build_run_config(&args)?;
+    if tui_mode {
+        Ok(CliAction::RunTui(cfg))
+    } else {
+        Ok(CliAction::Run(cfg))
+    }
+}
+
+/// Path of the config file selected by `--config`, or the default one.
+pub fn config_path_from_args(args: &[String]) -> Result<Option<PathBuf>, String> {
+    match args.iter().position(|a| a == "--config") {
+        Some(i) => args
+            .get(i + 1)
+            .map(|p| Some(PathBuf::from(p)))
+            .ok_or_else(|| "--config requires a path".to_string()),
+        None => Ok(default_config_path()),
+    }
+}
+
+/// Build the effective run configuration: config file, then CLI overrides.
+/// Also used to hot-reload the config when the file changes.
+pub fn build_run_config(args: &[String]) -> Result<(Config, bool), String> {
     let mut cfg = Config::default();
+    let config_path = config_path_from_args(args)?;
+    let explicit_config = args.iter().any(|a| a == "--config");
     if let Some(ref path) = config_path {
         if path.exists() {
             let text = fs::read_to_string(path)
@@ -252,43 +289,56 @@ pub fn parse_args_and_load() -> Result<CliAction, String> {
             }
             "--soft" => {
                 i += 1;
-                cfg.cpu_soft = parse_f64(&args, i, "--soft")?;
+                cfg.cpu_soft = parse_f64(args, i, "--soft")?;
             }
             "--high" => {
                 i += 1;
-                cfg.cpu_high = parse_f64(&args, i, "--high")?;
+                cfg.cpu_high = parse_f64(args, i, "--high")?;
             }
             "--cap" => {
+                // Removed in v0.2 (hard CPU cap via SIGSTOP was unsafe); accepted and ignored.
                 i += 1;
-                cfg.cpu_cap = parse_f64(&args, i, "--cap")?;
+                parse_f64(args, i, "--cap")?;
+            }
+            "--emergency-pause" => cfg.emergency_pause = true,
+            "--service" => {
+                cfg.service = true;
+                cfg.quiet = true;
+                if cfg.log_file.is_none() && cfg!(windows) {
+                    cfg.log_file = Some(
+                        crate::paths::default_service_log()
+                            .to_string_lossy()
+                            .to_string(),
+                    );
+                }
             }
             "--release" => {
                 i += 1;
-                cfg.cpu_release = parse_f64(&args, i, "--release")?;
+                cfg.cpu_release = parse_f64(args, i, "--release")?;
             }
             "--ram-high" => {
                 i += 1;
-                cfg.ram_high_pct = parse_f64(&args, i, "--ram-high")?;
+                cfg.ram_high_pct = parse_f64(args, i, "--ram-high")?;
             }
             "--ram-crit" => {
                 i += 1;
-                cfg.ram_critical_pct = parse_f64(&args, i, "--ram-crit")?;
+                cfg.ram_critical_pct = parse_f64(args, i, "--ram-crit")?;
             }
             "--disk-min-gb" => {
                 i += 1;
-                cfg.disk_min_free_gb = parse_f64(&args, i, "--disk-min-gb")?;
+                cfg.disk_min_free_gb = parse_f64(args, i, "--disk-min-gb")?;
             }
             "--swap-warn-mb" => {
                 i += 1;
-                cfg.swap_warn_mb = parse_f64(&args, i, "--swap-warn-mb")?;
+                cfg.swap_warn_mb = parse_f64(args, i, "--swap-warn-mb")?;
             }
             "--tick-ms" => {
                 i += 1;
-                cfg.tick_ms = parse_u64(&args, i, "--tick-ms")?;
+                cfg.tick_ms = parse_u64(args, i, "--tick-ms")?;
             }
             "--min-proc-cpu" => {
                 i += 1;
-                cfg.min_proc_cpu_pct = parse_f64(&args, i, "--min-proc-cpu")?;
+                cfg.min_proc_cpu_pct = parse_f64(args, i, "--min-proc-cpu")?;
             }
             "--protect" => {
                 i += 1;
@@ -307,11 +357,7 @@ pub fn parse_args_and_load() -> Result<CliAction, String> {
     }
 
     validate_config(&cfg)?;
-    if tui_mode {
-        Ok(CliAction::RunTui(cfg))
-    } else {
-        Ok(CliAction::Run(cfg))
-    }
+    Ok((cfg, tui_mode))
 }
 
 fn parse_f64(args: &[String], idx: usize, flag: &str) -> Result<f64, String> {
@@ -331,17 +377,17 @@ fn parse_u64(args: &[String], idx: usize, flag: &str) -> Result<u64, String> {
 }
 
 pub fn validate_config(cfg: &Config) -> Result<(), String> {
-    if !(1.0..=100.0).contains(&cfg.cpu_soft)
-        || !(1.0..=100.0).contains(&cfg.cpu_high)
-        || !(1.0..=100.0).contains(&cfg.cpu_cap)
-    {
+    if !(1.0..=100.0).contains(&cfg.cpu_soft) || !(1.0..=100.0).contains(&cfg.cpu_high) {
         return Err("CPU thresholds must be in [1.0, 100.0]".into());
     }
     if cfg.cpu_release >= cfg.cpu_soft {
         return Err("cpu_release must be strictly less than cpu_soft for hysteresis".into());
     }
-    if cfg.cpu_soft > cfg.cpu_high || cfg.cpu_high > cfg.cpu_cap {
-        return Err("Expected cpu_soft <= cpu_high <= cpu_cap".into());
+    if cfg.cpu_soft > cfg.cpu_high {
+        return Err("Expected cpu_soft <= cpu_high".into());
+    }
+    if !(5..=300).contains(&cfg.emergency_pause_secs) {
+        return Err("emergency_pause_secs must be between 5 and 300".into());
     }
     if !(10.0..=99.5).contains(&cfg.ram_high_pct)
         || !(10.0..=99.9).contains(&cfg.ram_critical_pct)
@@ -371,7 +417,7 @@ pub fn apply_toml_text(cfg: &mut Config, content: &str) -> Result<(), String> {
         match key {
             "cpu_soft" => cfg.cpu_soft = val.parse().map_err(|_| bad_val(key, val))?,
             "cpu_high" => cfg.cpu_high = val.parse().map_err(|_| bad_val(key, val))?,
-            "cpu_cap" => cfg.cpu_cap = val.parse().map_err(|_| bad_val(key, val))?,
+            "cpu_cap" => {} // removed in v0.2; ignored for compatibility
             "cpu_release" => cfg.cpu_release = val.parse().map_err(|_| bad_val(key, val))?,
             "soft_sustain_ms" => {
                 cfg.soft_sustain_ms = val.parse().map_err(|_| bad_val(key, val))?
@@ -393,6 +439,13 @@ pub fn apply_toml_text(cfg: &mut Config, content: &str) -> Result<(), String> {
             }
             "min_proc_rss_mb" => {
                 cfg.min_proc_rss_mb = val.parse().map_err(|_| bad_val(key, val))?
+            }
+            "min_governable_cpu_pct" => {
+                cfg.min_governable_cpu_pct = val.parse().map_err(|_| bad_val(key, val))?
+            }
+            "emergency_pause" => cfg.emergency_pause = val.parse().map_err(|_| bad_val(key, val))?,
+            "emergency_pause_secs" => {
+                cfg.emergency_pause_secs = val.parse().map_err(|_| bad_val(key, val))?
             }
             "dry_run" => cfg.dry_run = val.parse().map_err(|_| bad_val(key, val))?,
             "notify" => cfg.notify = val.parse().map_err(|_| bad_val(key, val))?,
@@ -475,21 +528,30 @@ pub fn write_default_config(path: &Path) -> Result<(), String> {
             .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
     }
     let body = r#"# resguard configuration
+#
+# Under sustained CPU load resguard lowers the priority of heavy command-line / batch
+# processes. It never pauses anything for CPU load, and never touches GUI apps, system
+# processes, terminals, shells or the protect list. Undo everything: resguard --restore
+
 # CPU thresholds (% of total machine capacity)
 cpu_release = 68.0
 cpu_soft = 75.0
 cpu_high = 95.0
-cpu_cap = 97.0
 soft_sustain_ms = 1000
 release_cooldown_ms = 5000
+# Don't act unless at least this much CPU comes from processes resguard may slow down
+min_governable_cpu_pct = 15.0
 
-# RAM, Swap & Disk emergency guard (prevents swap from filling low SSD)
+# Memory / swap / low-disk guard (alerts by default)
 ram_high_pct = 90.0
 ram_critical_pct = 95.0
 disk_min_free_gb = 8.0
 swap_warn_mb = 2048.0
+# Opt-in: pause the largest governable process during an emergency (bounded, auto-resume)
+emergency_pause = false
+emergency_pause_secs = 20
 
-# Control loop interval (ms) & minimum consumer filter
+# Sampling interval (ms) & minimum consumer filter
 tick_ms = 500
 min_proc_cpu_pct = 8.0
 min_proc_rss_mb = 256.0
@@ -500,7 +562,7 @@ notify = true
 quiet = false
 # log_file = "/tmp/resguard.log"
 
-# Extra process names to never throttle or pause
+# Extra process names to never touch
 protect_extra = ["Docker", "Ollama"]
 "#;
     fs::write(path, body).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
@@ -567,17 +629,19 @@ pub fn save_config(path: &Path, cfg: &Config) -> Result<(), String> {
 cpu_release = {cpu_release:.1}\n\
 cpu_soft = {cpu_soft:.1}\n\
 cpu_high = {cpu_high:.1}\n\
-cpu_cap = {cpu_cap:.1}\n\
 soft_sustain_ms = {soft_sustain_ms}\n\
 release_cooldown_ms = {release_cooldown_ms}\n\
+min_governable_cpu_pct = {min_governable_cpu_pct:.1}\n\
 \n\
-# RAM, Swap & Disk emergency guard (prevents swap from filling low SSD)\n\
+# Memory / swap / low-disk guard (alerts; pausing is opt-in and time-bounded)\n\
 ram_high_pct = {ram_high_pct:.1}\n\
 ram_critical_pct = {ram_critical_pct:.1}\n\
 disk_min_free_gb = {disk_min_free_gb:.1}\n\
 swap_warn_mb = {swap_warn_mb:.1}\n\
+emergency_pause = {emergency_pause}\n\
+emergency_pause_secs = {emergency_pause_secs}\n\
 \n\
-# Control loop interval (ms) & minimum consumer filter\n\
+# Sampling interval (ms) & minimum consumer filter\n\
 tick_ms = {tick_ms}\n\
 min_proc_cpu_pct = {min_proc_cpu_pct:.1}\n\
 min_proc_rss_mb = {min_proc_rss_mb:.1}\n\
@@ -595,7 +659,9 @@ auto_update_interval_hours = {auto_update_interval_hours}\n\
         cpu_release = cfg.cpu_release,
         cpu_soft = cfg.cpu_soft,
         cpu_high = cfg.cpu_high,
-        cpu_cap = cfg.cpu_cap,
+        min_governable_cpu_pct = cfg.min_governable_cpu_pct,
+        emergency_pause = cfg.emergency_pause,
+        emergency_pause_secs = cfg.emergency_pause_secs,
         soft_sustain_ms = cfg.soft_sustain_ms,
         release_cooldown_ms = cfg.release_cooldown_ms,
         ram_high_pct = cfg.ram_high_pct,
@@ -619,7 +685,10 @@ auto_update_interval_hours = {auto_update_interval_hours}\n\
 
 fn print_help() {
     println!(
-        r#"resguard — universal low-overhead resource watcher & governor
+        r#"resguard — keeps your desktop responsive by de-prioritizing heavy batch work
+
+Never pauses apps for CPU load; never touches GUI apps, system processes, terminals,
+shells or protected names. Every change is recorded and reversible (--restore).
 
 USAGE:
     resguard [OPTIONS]
@@ -628,12 +697,13 @@ OPTIONS:
     -t, --tui, --dash       Launch interactive htop/btop-style terminal dashboard
     --dry-run               Observe & log actions without modifying processes
     --once                  Print one snapshot and exit
-    --soft <PCT>            Soft CPU watermark -> background QoS / E-cores (default: 75)
-    --high <PCT>            High CPU watermark -> duty-cycle throttling (default: 95)
-    --cap <PCT>             Hard CPU ceiling -> aggressive throttling (default: 97)
+    --soft <PCT>            Sustained CPU above this lowers priority of heavy batch work (default: 75)
+    --high <PCT>            CPU considered saturated (display / alerts) (default: 95)
     --release <PCT>         Hysteresis release threshold (default: 68)
     --ram-high <PCT>        High RAM % threshold (default: 90)
-    --ram-crit <PCT>        Critical RAM % -> pause top allocator (default: 95)
+    --ram-crit <PCT>        Critical RAM % -> memory alert (default: 95)
+    --emergency-pause       Opt-in: during a memory emergency, pause the largest governable
+                            process for at most emergency_pause_secs (default: 20)
     --disk-min-gb <GB>      Min free SSD GB before swap-emergency guard (default: 8)
     --swap-warn-mb <MB>     Swap MB threshold combined with low disk (default: 2048)
     --tick-ms <MS>          Sampling interval in ms (default: 500)
@@ -650,6 +720,8 @@ OPTIONS:
     --no-auto-update        Disable automatic background self-updates
     --check-update          Check GitHub Releases for a newer version and exit
     --update                Download and install the latest release and exit
+    --restore               Undo every change resguard has made (priorities, pauses) and exit
+    --service               Run as the background service (used by --install-service)
     --install-service       Install and start resguard as a user/system service
     --uninstall-service     Stop and remove the resguard service
     --service-status        Print installed service status
@@ -669,7 +741,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.cpu_soft = 72.0;
         cfg.cpu_high = 91.0;
-        cfg.cpu_cap = 96.0;
+        cfg.emergency_pause = true;
         cfg.protect_names.push("MyCustomWorker".to_string());
         cfg.log_file = Some("/tmp/my_resguard.log".to_string());
 
@@ -678,7 +750,7 @@ mod tests {
 
         assert!((loaded.cpu_soft - 72.0).abs() < 0.01);
         assert!((loaded.cpu_high - 91.0).abs() < 0.01);
-        assert!((loaded.cpu_cap - 96.0).abs() < 0.01);
+        assert!(loaded.emergency_pause);
         assert_eq!(loaded.log_file.as_deref(), Some("/tmp/my_resguard.log"));
         assert!(loaded.protect_names.iter().any(|n| n == "MyCustomWorker"));
         assert!(loaded.protect_names.iter().any(|n| n == "rs-dash"));

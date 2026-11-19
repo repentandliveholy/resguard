@@ -106,7 +106,10 @@ jobs:
           sips -z 256 256   "$ICONSET/icon_512x512.png" --out "$ICONSET/icon_256x256.png" >/dev/null
           cp "$ICONSET/icon_512x512.png" "$ICONSET/icon_256x256@2x.png"
           iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/AppIcon.icns"
-          cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
+          # Bundle version comes from Cargo.toml (pre-release suffix stripped: Apple wants x.y.z)
+          VERSION=$(grep -m1 -E '^version *= *"' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          BUNDLE_VERSION="${VERSION%%-*}"
+          cat > "$APP_DIR/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -128,9 +131,9 @@ jobs:
               <key>CFBundlePackageType</key>
               <string>APPL</string>
               <key>CFBundleShortVersionString</key>
-              <string>0.1.0</string>
+              <string>${BUNDLE_VERSION}</string>
               <key>CFBundleVersion</key>
-              <string>1</string>
+              <string>${BUNDLE_VERSION}</string>
               <key>LSMinimumSystemVersion</key>
               <string>12.0</string>
               <key>NSHighResolutionCapable</key>
@@ -151,11 +154,24 @@ jobs:
           Copy-Item README.md dist/stage/
           Compress-Archive -Force -Path dist/stage/* -DestinationPath dist/${{ matrix.archive }}
 
+      - name: Build Windows installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # Installs Inno Setup via Chocolatey if ISCC.exe is not already present,
+        # reads the version from Cargo.toml, and writes
+        # dist/resguard-setup-windows-x86_64.exe.
+        run: ./installer/windows/build-installer.ps1 -SourceDir dist/stage -OutputDir dist
+
+      # Upload only the release archives/installer (not dist/stage or dist/app).
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
-          path: dist/*
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.exe
 
   publish:
     needs: build
